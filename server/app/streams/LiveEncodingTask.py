@@ -138,6 +138,7 @@ class LiveEncodingTask:
 
         # オプションの入る配列
         options: list[str] = []
+        use_vaapi = os.environ.get('KONOMITV_FFMPEG_VAAPI') == '1'  # [VAAPI-PATCH]
 
         # 入力ストリームの解析時間
         analyzeduration = round(500000 + (self._retry_count * 200000))  # リトライ回数に応じて少し増やす
@@ -148,6 +149,8 @@ class LiveEncodingTask:
 
         # 入力
         ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
+        if use_vaapi:  # [VAAPI-PATCH]
+            options.append('-hwaccel vaapi -hwaccel_device /dev/dri/renderD128 -hwaccel_output_format vaapi')
         options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
 
         # ストリームのマッピング
@@ -159,19 +162,21 @@ class LiveEncodingTask:
         ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
-        options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads auto')
+        options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads 0')
 
         # 映像
         ## コーデック
-        if QUALITY[quality].is_hevc is True:
+        if use_vaapi:  # [VAAPI-PATCH]
+            options.append('-vcodec h264_vaapi')  # H.264 (VA-API)
+        elif QUALITY[quality].is_hevc is True:
             options.append('-vcodec libx265')  # H.265/HEVC (通信節約モード)
         else:
             options.append('-vcodec libx264')  # H.264
 
         ## ビットレートと品質
         options.append(f'-flags +cgop -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
-        options.append('-preset veryfast -aspect 16:9')
-        if QUALITY[quality].is_hevc is True:
+        options.append('-aspect 16:9' if use_vaapi else '-preset veryfast -aspect 16:9')  # [VAAPI-PATCH]
+        if QUALITY[quality].is_hevc is True and not use_vaapi:
             options.append('-profile:v main')
         else:
             options.append('-profile:v high')
@@ -192,22 +197,22 @@ class LiveEncodingTask:
 
         ## BS4K は 60p (プログレッシブ) で放送されているので、インターレース解除を行わず 60fps でエンコードする
         if channel_type == "BS4K":
-            options.append(f'-vf scale={video_width}:{video_height}')
+            options.append(f'-vf scale_vaapi=w={video_width}:h={video_height}' if use_vaapi else f'-vf scale={video_width}:{video_height}')  # [VAAPI-PATCH]
             options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
         else:
             ## インターレース解除 (60i → 60p (フレームレート: 60fps))
             if QUALITY[quality].is_60fps is True:
-                options.append(f'-vf yadif=mode=1:parity=-1:deint=1,scale={video_width}:{video_height}')
+                options.append(f'-vf deinterlace_vaapi=rate=field,scale_vaapi=w={video_width}:h={video_height}' if use_vaapi else f'-vf yadif=mode=1:parity=-1:deint=1,scale={video_width}:{video_height}')  # [VAAPI-PATCH]
                 options.append(f'-r 60000/1001 -g {int(gop_length_second * 60)}')
             ## インターレース解除 (60i → 30p (フレームレート: 30fps))
             else:
                 # 24fps モードでは、テレシネ由来の重複フレームを取り除いて 24/30p 混合 VFR で出力する
                 ## dejudder を併用すると、24fps 区間の PTS が 41.7ms 間隔に均されて本来の 24fps に近い時刻列になる
                 if self.live_stream.encoding_options.is_24fps_mode_enabled is True:
-                    options.append(f'-vf pullup,dejudder,scale={video_width}:{video_height}')
+                    options.append(f'-vf deinterlace_vaapi,scale_vaapi=w={video_width}:h={video_height}' if use_vaapi else f'-vf pullup,dejudder,scale={video_width}:{video_height}')  # [VAAPI-PATCH]
                     options.append(f'-fps_mode vfr -g {int(gop_length_second * 30)}')
                 else:
-                    options.append(f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')
+                    options.append(f'-vf deinterlace_vaapi,scale_vaapi=w={video_width}:h={video_height}' if use_vaapi else f'-vf yadif=mode=0:parity=-1:deint=1,scale={video_width}:{video_height}')  # [VAAPI-PATCH]
                     options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
 
         # 音声
@@ -253,7 +258,7 @@ class LiveEncodingTask:
         ## max_interleave_delta: mux 時に影響するオプションで、増やしすぎると CM で詰まりがちになる
         ## リトライなしの場合は 500K (0.5秒) に設定し、リトライ回数に応じて 100K (0.1秒) ずつ増やす
         max_interleave_delta = round(500 + (self._retry_count * 100))
-        options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads auto')
+        options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads 0')
 
         # 音声
         ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
@@ -747,7 +752,7 @@ class LiveEncodingTask:
             # エンコーダープロセスを非同期で作成・実行
             try:
                 encoder = await asyncio.subprocess.create_subprocess_exec(
-                    *[LIBRARY_PATH['FFmpeg'], *encoder_options],
+                    *[('/usr/bin/ffmpeg' if os.environ.get('KONOMITV_FFMPEG_VAAPI') == '1' else LIBRARY_PATH['FFmpeg']), *encoder_options],  # [VAAPI-PATCH]
                     stdin = tsreadex_read_pipe,  # tsreadex からの入力
                     stdout = asyncio.subprocess.PIPE,  # ストリーム出力
                     stderr = asyncio.subprocess.PIPE,  # ログ出力

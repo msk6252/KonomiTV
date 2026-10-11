@@ -1,0 +1,7 @@
+FROM ghcr.io/tsukumijima/konomitv:latest
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo && \
+    rm -rf /var/lib/apt/lists/*
+COPY server/app/streams/LiveEncodingTask.py /code/server/app/streams/LiveEncodingTask.py
+ENV LIBVA_DRIVER_NAME=i965
+ENV KONOMITV_FFMPEG_VAAPI=1

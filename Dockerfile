@@ -92,6 +92,8 @@ RUN apt-get update && \
         libfontconfig1 libfreetype6 libfribidi0 \
         # Intel GPU 関連のライブラリ
         intel-media-va-driver-non-free intel-opencl-icd libigfxcmrt7 libmfx1 libmfxgen1 libva-drm2 libva-x11-2 \
+        # [VAAPI-PATCH] VA-API (i965) 用の FFmpeg とドライバ
+        ffmpeg i965-va-driver vainfo \
         # NVIDIA GPU 関連のライブラリ
         cuda-nvrtc-12-8 libnpp-12-8 \
         # AMD GPU 関連のライブラリ
@@ -127,4 +129,8 @@ COPY --from=client-builder /code/client/dist/ /code/client/dist/
 COPY ./config.example.yaml /code/config.example.yaml
 
 # KonomiTV サーバーを起動
+# [VAAPI-PATCH] i965 ドライバで VA-API エンコードを使う
+ENV LIBVA_DRIVER_NAME=i965
+ENV KONOMITV_FFMPEG_VAAPI=1
+
 ENTRYPOINT ["/code/server/.venv/bin/python", "KonomiTV.py"]
