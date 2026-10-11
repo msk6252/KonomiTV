@@ -1,7 +1,17 @@
+# クライアント (Tesla 用 Canvas 描画ページを含む) をビルドするステージ
+# ベースイメージ内の client/dist は公式ビルドのままなので、このフォークのクライアントを別途ビルドして差し替える
+FROM node:20.16.0 AS client-builder
+WORKDIR /code/client/
+COPY ./client/package.json ./client/yarn.lock /code/client/
+RUN yarn install --frozen-lockfile
+COPY ./client/ /code/client/
+RUN yarn build
+
 FROM ghcr.io/tsukumijima/konomitv:latest
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo && \
     rm -rf /var/lib/apt/lists/*
 COPY server/app/streams/LiveEncodingTask.py /code/server/app/streams/LiveEncodingTask.py
+COPY --from=client-builder /code/client/dist/ /code/client/dist/
 ENV LIBVA_DRIVER_NAME=i965
 ENV KONOMITV_FFMPEG_VAAPI=1
