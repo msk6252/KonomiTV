@@ -11,6 +11,7 @@ import { watch } from 'vue';
 import APIClient from '@/services/APIClient';
 import OfflineVideos from '@/services/OfflineVideos';
 import CustomBufferController from '@/services/player/CustomBufferController';
+import CanvasRenderManager from '@/services/player/managers/CanvasRenderManager';
 import CaptureManager from '@/services/player/managers/CaptureManager';
 import DocumentPiPManager from '@/services/player/managers/DocumentPiPManager';
 import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
@@ -83,6 +84,9 @@ class PlayerController {
     // 再生モード (Live: ライブ視聴, Video: ビデオ視聴)
     private readonly playback_mode: 'Live' | 'Video';
 
+    // 映像を <video> ではなく <canvas> に転写して表示するかどうか (Tesla ブラウザ向けの Canvas 描画モード)
+    private readonly canvas_render_mode: boolean;
+
     // 画質プロファイル (Wi-Fi 回線時 / モバイル回線時)
     // デフォルトは自動判定だが、ユーザーによって手動変更されうる
     private quality_profile_type: 'Wi-Fi' | 'Cellular';
@@ -135,10 +139,13 @@ class PlayerController {
      * コンストラクタ
      * 実際の DPlayer の初期化処理は await init() で行われる
      */
-    constructor(playback_mode: 'Live' | 'Video') {
+    constructor(playback_mode: 'Live' | 'Video', canvas_render_mode: boolean = false) {
 
         // 再生モードをセット
         this.playback_mode = playback_mode;
+
+        // Canvas 描画モードかどうかをセット
+        this.canvas_render_mode = canvas_render_mode;
 
         const player_store = usePlayerStore();
         if (player_store.selected_quality_profile_type !== null) {
@@ -1213,6 +1220,11 @@ class PlayerController {
             ];
         }
 
+        // Canvas 描画モードのときだけ、映像を Canvas に転写する CanvasRenderManager を追加する
+        if (this.canvas_render_mode === true) {
+            this.player_managers.push(new CanvasRenderManager(this.player));
+        }
+
         // 登録されている PlayerManager をすべて初期化
         // これにより各 PlayerManager での実際の処理が開始される
         // 同期処理すると時間が掛かるので、並行して実行する
@@ -2065,6 +2077,12 @@ class PlayerController {
             const deinterlacer = this.player?.plugins.mpeg2toh264?.deinterlacer;
             if (deinterlacer instanceof Deinterlacer && deinterlacer.running === true) {
                 return deinterlacer.container;
+            }
+            // Canvas 描画モードでは、実際に見えている Canvas の方にクロップ変形を適用する
+            for (const player_manager of this.player_managers) {
+                if (player_manager instanceof CanvasRenderManager && player_manager.active_canvas !== null) {
+                    return player_manager.active_canvas;
+                }
             }
             return this.player!.video;
         };
