@@ -30,9 +30,6 @@ class CanvasRenderManager implements PlayerManager {
     // <video> 要素に元々設定されていたインラインスタイル (destroy() 時に復元する)
     private original_video_style_text = '';
 
-    // 親要素に元々設定されていた position (destroy() 時に復元する。変更しなかった場合は null)
-    private original_parent_position: string | null = null;
-
     // requestVideoFrameCallback() / requestAnimationFrame() のハンドル (destroy() 時にキャンセルする)
     private frame_callback_handle: number | null = null;
 
@@ -84,10 +81,9 @@ class CanvasRenderManager implements PlayerManager {
         // 映像表示用の Canvas を生成
         // 不透明な Canvas かつ desynchronized (低遅延描画) を指定することで、描画コストと遅延を最小限にする
         const canvas = document.createElement('canvas');
-        canvas.className = 'dplayer-video konomitv-canvas-video';
-        canvas.style.width = '100%';
-        canvas.style.height = '100%';
-        canvas.style.display = 'block';
+        // 配置 (絶対配置で <video> に重ねる) は Player.vue の .konomitv-canvas-video で定義している
+        // L字画面クロップが style.position を書き換えても配置が崩れないよう、あえてインラインスタイルでは指定していない
+        canvas.className = 'konomitv-canvas-video';
         canvas.style.objectFit = 'contain';
         // クリックやタッチは <video> と同様、親の DPlayer コンテナ側のイベントハンドラーに任せる
         canvas.setAttribute('aria-hidden', 'true');
@@ -101,18 +97,10 @@ class CanvasRenderManager implements PlayerManager {
         this.context = context;
 
         // <video> 要素は音声再生とデコードのために DOM に残したまま、見えない状態にする
-        // display: none や visibility: hidden だとブラウザによってはデコードが止まるため、opacity: 0 と絶対配置で退避させる
-        // 絶対配置の基準になるよう、親要素が position: static の場合のみ relative にする
+        // display: none や visibility: hidden だとブラウザによってはデコードが止まるため、opacity: 0 で隠す
+        // DPlayer は <video> の大きさで映像表示枠 (16:9) のサイズを決めているため、<video> はレイアウト上の位置に残す必要がある
+        // Canvas はこの <video> の上に絶対配置で重ねる
         this.original_video_style_text = video.style.cssText;
-        if (getComputedStyle(parent).position === 'static') {
-            this.original_parent_position = parent.style.position;
-            parent.style.position = 'relative';
-        }
-        video.style.position = 'absolute';
-        video.style.top = '0';
-        video.style.left = '0';
-        video.style.width = '100%';
-        video.style.height = '100%';
         video.style.opacity = '0';
         video.style.pointerEvents = 'none';
 
@@ -213,20 +201,16 @@ class CanvasRenderManager implements PlayerManager {
         // Canvas を除去
         this.canvas_element?.remove();
 
-        // <video> 要素のスタイルと親要素の position を元に戻す
+        // <video> 要素のスタイルを元に戻す
         // 画質切り替えで <video> 要素自体がすでに破棄されている場合でも、元の要素に対して戻すだけなので問題ない
         if (this.video_element !== null) {
             this.video_element.style.cssText = this.original_video_style_text;
-            if (this.original_parent_position !== null && this.video_element.parentElement) {
-                this.video_element.parentElement.style.position = this.original_parent_position;
-            }
         }
 
         this.canvas_element = null;
         this.context = null;
         this.video_element = null;
         this.original_video_style_text = '';
-        this.original_parent_position = null;
 
         console.log('[CanvasRenderManager] Destroyed.');
     }
