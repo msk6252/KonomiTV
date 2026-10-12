@@ -3,7 +3,10 @@
 FROM node:20.16.0 AS client-builder
 WORKDIR /code/client/
 COPY ./client/package.json ./client/yarn.lock /code/client/
-RUN yarn install --frozen-lockfile
+# ネットワークが不安定な環境でも失敗しにくいよう、タイムアウトを延長し、取得済みパッケージを BuildKit のキャッシュに残す
+# (再試行や再ビルドのとき、ダウンロード済みのパッケージを再取得せずに済む)
+RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
+    yarn install --frozen-lockfile --network-timeout 600000 --network-concurrency 4
 COPY ./client/ /code/client/
 RUN yarn build
 
