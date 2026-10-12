@@ -1,20 +1,10 @@
-# クライアント (Tesla 用 Canvas 描画ページを含む) をビルドするステージ
-# ベースイメージ内の client/dist は公式ビルドのままなので、このフォークのクライアントを別途ビルドして差し替える
-FROM node:20.16.0 AS client-builder
-WORKDIR /code/client/
-COPY ./client/package.json ./client/yarn.lock /code/client/
-# ネットワークが不安定な環境でも失敗しにくいよう、タイムアウトを延長し、取得済みパッケージを BuildKit のキャッシュに残す
-# (再試行や再ビルドのとき、ダウンロード済みのパッケージを再取得せずに済む)
-RUN --mount=type=cache,target=/usr/local/share/.cache/yarn \
-    yarn install --frozen-lockfile --network-timeout 600000 --network-concurrency 4
-COPY ./client/ /code/client/
-RUN yarn build
-
 FROM ghcr.io/tsukumijima/konomitv:latest
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo && \
     rm -rf /var/lib/apt/lists/*
 COPY server/app/streams/LiveEncodingTask.py /code/server/app/streams/LiveEncodingTask.py
-COPY --from=client-builder /code/client/dist/ /code/client/dist/
+# ビルド済みのクライアント (Tesla 用 Canvas 描画ページを含む) で、ベースイメージ内の公式ビルドを差し替える
+# C200 はディスク容量が少なく yarn install / yarn build が実行できないため、client/dist は別マシンでビルドして Git で受け渡す
+COPY client/dist/ /code/client/dist/
 ENV LIBVA_DRIVER_NAME=i965
 ENV KONOMITV_FFMPEG_VAAPI=1
