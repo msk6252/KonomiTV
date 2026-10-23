@@ -13,6 +13,7 @@ import OfflineVideos from '@/services/OfflineVideos';
 import CustomBufferController from '@/services/player/CustomBufferController';
 import PlaybackEngine from '@/services/player/engine/PlaybackEngine';
 import createVideoElementShim from '@/services/player/engine/VideoElementShim';
+import CanvasRenderManager from '@/services/player/managers/CanvasRenderManager';
 import CaptureManager from '@/services/player/managers/CaptureManager';
 import DocumentPiPManager from '@/services/player/managers/DocumentPiPManager';
 import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
@@ -95,6 +96,9 @@ class PlayerController {
     // 再生モード (Live: ライブ視聴, Video: ビデオ視聴)
     private readonly playback_mode: 'Live' | 'Video';
 
+    // 映像を <video> ではなく <canvas> に転写して表示するかどうか (Tesla ブラウザ向けの Canvas 描画モード)
+    private readonly canvas_render_mode: boolean;
+
     // 画質プロファイル (Wi-Fi 回線時 / モバイル回線時)
     // デフォルトは自動判定だが、ユーザーによって手動変更されうる
     private quality_profile_type: 'Wi-Fi' | 'Cellular';
@@ -147,10 +151,13 @@ class PlayerController {
      * コンストラクタ
      * 実際の DPlayer の初期化処理は await init() で行われる
      */
-    constructor(playback_mode: 'Live' | 'Video') {
+    constructor(playback_mode: 'Live' | 'Video', canvas_render_mode: boolean = false) {
 
         // 再生モードをセット
         this.playback_mode = playback_mode;
+
+        // Canvas 描画モードかどうかをセット
+        this.canvas_render_mode = canvas_render_mode;
 
         const player_store = usePlayerStore();
         if (player_store.selected_quality_profile_type !== null) {
@@ -420,9 +427,14 @@ class PlayerController {
                 if (this.playback_mode === 'Live') {
                     // ライブストリーミング API のベース URL
                     const streaming_api_base_url = `${Utils.api_base_url}/streams/live/${channels_store.channel.current.display_channel_id}`;
+                    // Canvas 描画モード (Tesla ブラウザ向け) かつ WebCodecs に対応している端末では、video 要素を
+                    // 一切使わない WebCodecs 自前再生エンジンを使う。MPEG-2 は WebCodecs の VideoDecoder が
+                    // 対応していないコーデックのため、Original (MPEG-2) 画質はこのモードでは選択肢に含めない
+                    const use_webcodecs_engine = this.canvas_render_mode === true && is_webcodecs_engine_supported === true;
                     // ラジオチャンネルの場合
                     // API が受け付ける画質の値は通常のチャンネルと同じだが (手抜き…)、実際の画質は 48KHz/192kbps で固定される
                     // ラジオチャンネルの場合は、1080p と渡しても 48kHz/192kbps 固定の音声だけの MPEG-TS が配信される
+                    // (ラジオは映像が無く WebCodecs エンジンの前提と合わないため、Canvas 描画モードでも従来の mpegts.js を使う)
                     if (channels_store.channel.current.is_radiochannel === true) {
                         qualities.push({
                             name: '48kHz/192kbps',
@@ -431,28 +443,36 @@ class PlayerController {
                         });
                     // 通常のチャンネルの場合
                     } else {
-                        // mpeg2toh264 によるオリジナル画質は常に画質リストの先頭に追加する
-                        qualities.push({
-                            name: 'Original (MPEG-2)',
-                            type: 'mpeg2toh264',
-                            url: `${streaming_api_base_url}/original/mpegts`,
-                        });
+                        // mpeg2toh264 によるオリジナル画質は常に画質リストの先頭に追加する (WebCodecs エンジン使用時を除く)
+                        if (use_webcodecs_engine === false) {
+                            qualities.push({
+                                name: 'Original (MPEG-2)',
+                                type: 'mpeg2toh264',
+                                url: `${streaming_api_base_url}/original/mpegts`,
+                            });
+                        }
                         // 画質リストを作成
                         for (const quality_name of LIVE_STREAMING_QUALITIES) {
                             qualities.push({
                                 // 1080p-60fps のみ、見栄えの観点から表示上 "1080p (60fps)" と表示する
                                 name: quality_name === '1080p-60fps' ? '1080p (60fps)' : quality_name,
-                                type: 'mpegts',
+                                // 'webcodecs' は DPlayer の customType 拡張点で処理する独自タイプ (setupWebCodecsQuality() 参照)
+                                type: use_webcodecs_engine === true ? 'webcodecs' : 'mpegts',
                                 url: `${streaming_api_base_url}/${build_api_quality(quality_name)}/mpegts`,
                             });
                         }
                     }
                     // デフォルトの画質
+                    // 24fps モードがオンであれば 24fps で再生できる 1080p 、それ以外は最高画質でヌルヌルな 1080p (60fps) を
+                    // WebCodecs エンジン使用時 (Original (MPEG-2) が選べない) のフォールバック画質とする
+                    const original_quality_fallback = this.quality_profile.tv_24fps_mode === true ? '1080p' : '1080p (60fps)';
                     let default_quality: string;
-                    // デフォルト画質に original が指定されている場合、ラジオチャンネルを除きデフォルト画質を "Original (MPEG-2)" に設定する
+                    // デフォルト画質に original が指定されている場合、ラジオチャンネル・WebCodecs エンジン使用時を除き
+                    // デフォルト画質を "Original (MPEG-2)" に設定する
                     if (this.quality_profile.tv_streaming_quality === 'original') {
                         // ラジオチャンネルは mpeg2toh264 に対応していないため、1080p 固定 (実際には映像エンコードは行われない)
-                        default_quality = channels_store.channel.current.is_radiochannel === true ? '1080p' : 'Original (MPEG-2)';
+                        default_quality = channels_store.channel.current.is_radiochannel === true ? '1080p' :
+                            (use_webcodecs_engine === true ? original_quality_fallback : 'Original (MPEG-2)');
                     } else {
                         // DPlayer は表示名と完全一致する画質を選ぶため、1080p-60fps のみ表示名へ変換する
                         default_quality = this.quality_profile.tv_streaming_quality === '1080p-60fps' ?
@@ -461,7 +481,13 @@ class PlayerController {
                     if (options.default_quality !== null) {
                         // PlayerController.init() のオプションでデフォルト画質が指定されている場合は
                         // 画質プロファイルに記載の画質ではなく、指定された（前回再生時の）画質を使ってレジュームする
-                        default_quality = options.default_quality;
+                        if (options.default_quality === 'Original (MPEG-2)' && use_webcodecs_engine === true) {
+                            // WebCodecs エンジン使用時は Original (MPEG-2) 自体を画質リストに含めていないため、
+                            // 前回再生時の画質として指定されていても通常の（内部的に再エンコードを挟む）最高画質に切り替える
+                            default_quality = original_quality_fallback;
+                        } else {
+                            default_quality = options.default_quality;
+                        }
                     }
                     // ラジオチャンネルのみ常に 48KHz/192kbps に固定する
                     if (channels_store.channel.current.is_radiochannel) {
@@ -470,6 +496,11 @@ class PlayerController {
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
+                        // 'webcodecs' タイプの画質が選択されたときに DPlayer 本体の MSE 初期化処理を経由せず呼ばれる拡張点
+                        // (Canvas 描画モード (Tesla ブラウザ向け) で WebCodecs が使える場合のみ実際に使われる)
+                        customType: {
+                            webcodecs: (video: HTMLVideoElement, player: DPlayer) => this.setupWebCodecsQuality(video, player),
+                        },
                     };
 
                 // ビデオ視聴: 録画番組情報がセットされているはず
@@ -1234,6 +1265,14 @@ class PlayerController {
             ];
         }
 
+        // Canvas 描画モードのときだけ、映像を Canvas に転写する CanvasRenderManager を追加する
+        // ただし WebCodecs 自前再生エンジンが既に稼働している (= setupWebCodecsQuality() が呼ばれ、
+        // player.video は既に canvas ベースのシムに置き換わっている) 場合は不要かつ二重描画になるため追加しない
+        // (WebCodecs 非対応ブラウザ・ラジオチャンネル等で WebCodecs エンジンが使われなかった場合のフォールバックとして働く)
+        if (this.canvas_render_mode === true && this.playback_engine === null) {
+            this.player_managers.push(new CanvasRenderManager(this.player));
+        }
+
         // 登録されている PlayerManager をすべて初期化
         // これにより各 PlayerManager での実際の処理が開始される
         // 同期処理すると時間が掛かるので、並行して実行する
@@ -1331,8 +1370,9 @@ class PlayerController {
      */
     private setupWebCodecsQuality(video: HTMLVideoElement, player: DPlayer): void {
 
-        const master_playlist_url = player.quality?.url;
-        if (master_playlist_url === undefined) {
+        // ビデオ視聴では録画番組の master playlist URL、ライブ視聴では mpegts ストリームの URL が入る
+        const quality_url = player.quality?.url;
+        if (quality_url === undefined) {
             console.error('[PlayerController] setupWebCodecsQuality: no quality URL is available.');
             return;
         }
@@ -1378,9 +1418,13 @@ class PlayerController {
         // プレイリスト取得・再生開始は非同期で行う (customType のハンドラ自体は同期 API のため待たない)
         void (async () => {
             try {
-                await engine.loadRecordedVideo(master_playlist_url, start_position_seconds);
+                if (this.playback_mode === 'Live') {
+                    await engine.loadLiveStream(quality_url);
+                } else {
+                    await engine.loadRecordedVideo(quality_url, start_position_seconds);
+                }
             } catch (error) {
-                console.error('[PlayerController] setupWebCodecsQuality: failed to load recorded video.', error);
+                console.error('[PlayerController] setupWebCodecsQuality: failed to load stream.', error);
             } finally {
                 // 古いエンジンは新しいエンジンの初回ロードが始まった後に破棄する (前の canvas が一瞬消えるのを避けるため)
                 void previous_playback_engine?.destroy();
@@ -2158,6 +2202,12 @@ class PlayerController {
             const deinterlacer = this.player?.plugins.mpeg2toh264?.deinterlacer;
             if (deinterlacer instanceof Deinterlacer && deinterlacer.running === true) {
                 return deinterlacer.container;
+            }
+            // Canvas 描画モードでは、実際に見えている Canvas の方にクロップ変形を適用する
+            for (const player_manager of this.player_managers) {
+                if (player_manager instanceof CanvasRenderManager && player_manager.active_canvas !== null) {
+                    return player_manager.active_canvas;
+                }
             }
             return this.player!.video;
         };

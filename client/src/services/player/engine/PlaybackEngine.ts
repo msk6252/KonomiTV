@@ -5,6 +5,7 @@ import AudioPipeline from '@/services/player/engine/AudioPipeline';
 import CanvasRenderer from '@/services/player/engine/CanvasRenderer';
 import JitterBuffer from '@/services/player/engine/JitterBuffer';
 import MediaClock, { HAVE_ENOUGH_DATA } from '@/services/player/engine/MediaClock';
+import LiveVideoSource from '@/services/player/engine/sources/LiveVideoSource';
 import RecordedVideoSource from '@/services/player/engine/sources/RecordedVideoSource';
 import VideoPipeline from '@/services/player/engine/VideoPipeline';
 
@@ -72,6 +73,35 @@ class PlaybackEngine {
         const source = new RecordedVideoSource(masterPlaylistUrl, callbacks, () => this.mediaClock.currentTime);
         this.source = source;
         await source.load(startPositionSeconds);
+    }
+
+    /** ライブ視聴用のソースを読み込み、再生準備を行う (シークは出来ない) */
+    public async loadLiveStream(streamUrl: string): Promise<void> {
+        await this.audioPipeline.initialize();
+        this.canvasRenderer.start();
+        // ライブは低遅延優先のプロファイルを使う (録画視聴向けの既定値から切り替える)
+        this.videoPipeline.setMaxQueueLength(JitterBuffer.getProfile('Live').videoQueueFrames);
+
+        const callbacks: IEngineSourceCallbacks = {
+            onVideoConfig: (config) => this.videoPipeline.configure(config),
+            onAudioConfig: (config) => this.audioPipeline.configure(config),
+            onVideoChunk: (chunk) => this.videoPipeline.decode(chunk),
+            onAudioChunk: (chunk) => this.audioPipeline.decode(chunk),
+            onDurationKnown: (durationSeconds) => this.mediaClock.setDuration(durationSeconds),
+            onBufferedRangesChanged: (ranges) => this.mediaClock.setBufferedRanges(ranges),
+            onSeeked: (positionSeconds) => {
+                this.mediaClock.reportSeeked(positionSeconds);
+                this.mediaClock.setReadyState(HAVE_ENOUGH_DATA);
+            },
+            onError: (message) => this.mediaClock.setError(0, message),
+            onEnded: () => this.mediaClock.reportEnded(),
+        };
+
+        const source = new LiveVideoSource(streamUrl, callbacks);
+        this.source = source;
+        await source.load(0);
+        // ライブは接続直後から再生を開始する (録画視聴のような事前シークは不要)
+        await this.mediaClock.play();
     }
 
     /** シークする (DPlayer の `seek()` → VideoElementShim の `currentTime` setter から呼ばれる想定) */

@@ -34,6 +34,10 @@ const TS_PACKET_LENGTH = 188;
 const SYNC_BYTE = 0x47;
 const PAT_PID = 0x00;
 
+// PTS/DTS は 90kHz クロックの 33bit 値で、約26.5時間でラップアラウンドする
+// ライブ視聴 (continuous モード) はこれより長時間再生されうるため、アンラップして扱う必要がある
+const PTS_WRAP_TICKS = 0x200000000;  // 2^33
+
 // AAC の1フレームが持つサンプル数 (KonomiTV サーバーは AAC-LC 固定、SBR 等の特殊設定は使わない前提)
 const AAC_SAMPLES_PER_FRAME = 1024;
 
@@ -220,7 +224,20 @@ function findAdtsFrames(data: Uint8Array): AdtsFrame[] {
     return frames;
 }
 
+export interface MpegTsDemuxerOptions {
+    /**
+     * true の場合、ライブ視聴向けの「継続ストリーム」モードになる
+     * - PAT/PMT で判明した PID は (新しい PMT が来るまで) 呼び出しをまたいで保持する (セグメント単位でリセットしない)
+     * - タイムスタンプは呼び出し間で永続する基準点 (最初に観測した映像キーフレームの PTS) からのオフセットになり、
+     *   33bit PTS のラップアラウンド (約26.5時間ごと) をアンラップしたうえで計算する
+     * false (既定、録画視聴向け) の場合は各呼び出しごとに PID・基準点をリセットする (既存の挙動)
+     */
+    continuous?: boolean;
+}
+
 class MpegTsDemuxer {
+
+    private readonly continuous: boolean;
 
     private pmtPid: number | null = null;
     private videoPid: number | null = null;
@@ -235,16 +252,44 @@ class MpegTsDemuxer {
     private lastAudioSampleRate: number | null = null;
     private lastAudioChannelCount: number | null = null;
 
+    // continuous モード専用: 永続するタイムスタンプ基準点と、33bit ラップアラウンドのアンラップ状態
+    private persistentAnchorPtsTicks: number | null = null;
+    private videoLastUnwrappedPtsTicks: number | null = null;
+    private audioLastUnwrappedPtsTicks: number | null = null;
+
+    constructor(options: MpegTsDemuxerOptions = {}) {
+        this.continuous = options.continuous ?? false;
+    }
+
+    /** 33bit PTS を、同じストリーム内で直前に観測した値との連続性を見てアンラップする */
+    private unwrapPtsTicks(raw: number, lastUnwrappedTicks: number | null): number {
+        if (lastUnwrappedTicks === null) {
+            return raw;
+        }
+        // lastUnwrapped と同じ "周" (2^33 の何倍目か) に raw を正規化してから、前後どちらにズレているか判定する
+        const wrapBase = Math.floor(lastUnwrappedTicks / PTS_WRAP_TICKS) * PTS_WRAP_TICKS;
+        let unwrapped = wrapBase + raw;
+        if (unwrapped < lastUnwrappedTicks - PTS_WRAP_TICKS / 2) {
+            unwrapped += PTS_WRAP_TICKS;
+        } else if (unwrapped > lastUnwrappedTicks + PTS_WRAP_TICKS / 2) {
+            unwrapped -= PTS_WRAP_TICKS;
+        }
+        return unwrapped;
+    }
+
     /**
-     * 1セグメント分の生 MPEG-TS バイト列を解析する
+     * 1セグメント分の生 MPEG-TS バイト列を解析する (録画視聴向け、continuous: false の場合に使う)
      * @param data セグメントのバイト列
      * @param nominalSegmentStartSeconds このセグメントのプレイリスト上の公称開始時刻 (sequence * segment_duration_seconds)
      */
     public demuxSegment(data: Uint8Array, nominalSegmentStartSeconds: number): MpegTsDemuxResult {
-        this.pmtPid = null;
-        this.videoPid = null;
-        this.videoStreamType = null;
-        this.audioPid = null;
+        if (this.continuous === false) {
+            // 録画視聴: セグメントごとに自己完結した PAT/PMT が送られてくるため、呼び出しごとに PID をリセットする
+            this.pmtPid = null;
+            this.videoPid = null;
+            this.videoStreamType = null;
+            this.audioPid = null;
+        }
         this.pesAssembly.clear();
         this.finishedPes = [];
 
@@ -267,6 +312,14 @@ class MpegTsDemuxer {
         }
 
         return this.buildResult(nominalSegmentStartSeconds);
+    }
+
+    /**
+     * 継続中のライブ MPEG-TS ストリームから読み取った、188byte 境界に揃えたバイト列を解析する (continuous: true 専用)
+     * セグメントという単位が無いため、タイムスタンプは永続する基準点からのオフセットになる (nominalSegmentStartSeconds は常に 0)
+     */
+    public demuxChunk(data: Uint8Array): MpegTsDemuxResult {
+        return this.demuxSegment(data, 0);
     }
 
     private handlePacket(data: Uint8Array, offset: number): void {
@@ -394,14 +447,35 @@ class MpegTsDemuxer {
             }
         }
 
-        if (rawVideoSamples.length === 0) {
-            // このセグメントに映像が無い場合、音声だけのタイムスタンプ基準を用意する手段が無いため、
-            // 音声のみのセグメントは Phase 1 では扱わない (録画は必ず映像ありの前提)
-            return result;
+        let anchorPtsTicks: number;
+        if (this.continuous === true) {
+            // ライブ: 33bit ラップアラウンドをアンラップしたうえで、呼び出しをまたいで永続する基準点を使う
+            for (const sample of rawVideoSamples) {
+                sample.ptsTicks = this.unwrapPtsTicks(sample.ptsTicks, this.videoLastUnwrappedPtsTicks);
+                this.videoLastUnwrappedPtsTicks = sample.ptsTicks;
+            }
+            for (const sample of rawAudioSamples) {
+                sample.ptsTicks = this.unwrapPtsTicks(sample.ptsTicks, this.audioLastUnwrappedPtsTicks);
+                this.audioLastUnwrappedPtsTicks = sample.ptsTicks;
+            }
+            if (this.persistentAnchorPtsTicks === null) {
+                if (rawVideoSamples.length === 0) {
+                    // まだ基準点となる映像キーフレームを一度も観測していないため、このチャンクは (音声のみでも) 扱えず捨てる
+                    return result;
+                }
+                this.persistentAnchorPtsTicks = rawVideoSamples[0].ptsTicks;
+            }
+            anchorPtsTicks = this.persistentAnchorPtsTicks;
+        } else {
+            if (rawVideoSamples.length === 0) {
+                // このセグメントに映像が無い場合、音声だけのタイムスタンプ基準を用意する手段が無いため、
+                // 音声のみのセグメントは Phase 1 では扱わない (録画は必ず映像ありの前提)
+                return result;
+            }
+            // アンカー: このセグメント内で最初に現れた映像サンプル (セグメントはキーフレーム境界で区切られているため先頭キーフレームのはず) のPTS
+            anchorPtsTicks = rawVideoSamples[0].ptsTicks;
         }
 
-        // アンカー: このセグメント内で最初に現れた映像サンプル (セグメントはキーフレーム境界で区切られているため先頭キーフレームのはず) のPTS
-        const anchorPtsTicks = rawVideoSamples[0].ptsTicks;
         const toTimestampUs = (ptsTicks: number): number => {
             const offsetSeconds = (ptsTicks - anchorPtsTicks) / 90000;
             return Math.round((nominalSegmentStartSeconds + offsetSeconds) * 1e6);
@@ -464,6 +538,9 @@ class MpegTsDemuxer {
         this.lastAudioCodec = null;
         this.lastAudioSampleRate = null;
         this.lastAudioChannelCount = null;
+        this.persistentAnchorPtsTicks = null;
+        this.videoLastUnwrappedPtsTicks = null;
+        this.audioLastUnwrappedPtsTicks = null;
     }
 }
 
