@@ -90,16 +90,6 @@ const handleSettingCoverClick = () => {
         .dplayer-video-wrap-aspect {
             transition: opacity 0.2s cubic-bezier(0.4, 0.38, 0.49, 0.94);
             opacity: 1;
-            // Canvas 描画モード (CanvasRenderManager) で <video> の上に重ねる Canvas
-            // L字画面クロップが style.position を書き換えても崩れないよう !important で絶対配置を固定する
-            .konomitv-canvas-video {
-                position: absolute !important;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                display: block;
-            }
         }
         .dplayer-danmaku {
             max-width: 100%;

@@ -46,6 +46,13 @@ export interface ITwitterPanelPostTarget {
 export interface ILocalClientSettings extends IClientSettings {
     last_synced_at: number;
     showed_panel_last_time: boolean;
+    // WebCodecs を使い <video> 要素を介さず自前で再生する実験的なエンジンを有効化するかどうか (ソース種別ごと)
+    // 端末の WebCodecs/AudioWorklet 対応状況に強く依存するため、同期無効 (IClientSettings に含めない)
+    webcodecs_player_enabled_sources: {
+        recorded: boolean;
+        mpeg2toh264: boolean;
+        mpegts: boolean;
+    };
     selected_twitter_panel_account: {kind: 'Twitter' | 'Bluesky' | 'Linked'; id: number;} | null;
     twitter_panel_post_targets: Record<string, ITwitterPanelPostTarget>;
     twitter_reply_thread_states: Record<string, ITwitterReplyThreadState>;
@@ -147,6 +154,13 @@ export const ILocalClientSettingsDefault: ILocalClientSettings = {
 
     // 前回視聴画面を開いた際にパネルが表示されていたかどうか (同期無効)
     showed_panel_last_time: true,
+    // WebCodecs を使った自前再生エンジンをソース種別ごとに有効化するかどうか (同期無効、端末依存)
+    // 設定画面には出さず、開発時に DevTools から直接書き換えて有効化する実験的機能 (Phase 1 は recorded のみ対応)
+    webcodecs_player_enabled_sources: {
+        recorded: false,
+        mpeg2toh264: false,
+        mpegts: false,
+    },
     // 視聴画面 Twitter タブで最後に選択していたアカウント (Twitter / Bluesky / 紐付け の tagged union、同期無効)
     // ID は Twitter / Bluesky / 紐付け それぞれの DB 連番 ID で、別環境間で意味が異なるため同期対象外
     selected_twitter_panel_account: null,

@@ -11,7 +11,8 @@ import { watch } from 'vue';
 import APIClient from '@/services/APIClient';
 import OfflineVideos from '@/services/OfflineVideos';
 import CustomBufferController from '@/services/player/CustomBufferController';
-import CanvasRenderManager from '@/services/player/managers/CanvasRenderManager';
+import PlaybackEngine from '@/services/player/engine/PlaybackEngine';
+import createVideoElementShim from '@/services/player/engine/VideoElementShim';
 import CaptureManager from '@/services/player/managers/CaptureManager';
 import DocumentPiPManager from '@/services/player/managers/DocumentPiPManager';
 import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
@@ -26,6 +27,12 @@ import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore, { LiveStreamingQuality, LIVE_STREAMING_QUALITIES, VideoStreamingQuality, VIDEO_STREAMING_QUALITIES } from '@/stores/SettingsStore';
 import Utils, { dayjs, PlayerUtils } from '@/utils';
 
+
+// WebCodecs による <video> タグを使わない自前再生エンジンが、この端末で利用可能かどうか
+// VideoDecoder/AudioDecoder/AudioWorkletNode のいずれかが無い端末ではエンジンを構築できないため、
+// フィーチャーフラグが有効でも従来の DPlayer + <video> + MSE 経路にフォールバックする
+const is_webcodecs_engine_supported = typeof VideoDecoder !== 'undefined' &&
+    typeof AudioDecoder !== 'undefined' && typeof AudioWorkletNode !== 'undefined';
 
 // デバイスのデコーダーが自動でのデインタレースに対応しているかを取得
 // この判定はデバイス単位で不変のため、初回ロード時に1回だけ実行して共有する
@@ -78,14 +85,15 @@ class PlayerController {
     // DPlayer のインスタンス
     private player: DPlayer | null = null;
 
+    // WebCodecs による自前再生エンジンのインスタンス (type: 'webcodecs' の画質が選択されている間のみ存在する)
+    // 画質切り替え等で破棄・再構築されるため、必ず setupWebCodecsQuality() 経由でのみ差し替えること
+    private playback_engine: PlaybackEngine | null = null;
+
     // それぞれの PlayerManager のインスタンスのリスト
     private player_managers: PlayerManager[] = [];
 
     // 再生モード (Live: ライブ視聴, Video: ビデオ視聴)
     private readonly playback_mode: 'Live' | 'Video';
-
-    // 映像を <video> ではなく <canvas> に転写して表示するかどうか (Tesla ブラウザ向けの Canvas 描画モード)
-    private readonly canvas_render_mode: boolean;
 
     // 画質プロファイル (Wi-Fi 回線時 / モバイル回線時)
     // デフォルトは自動判定だが、ユーザーによって手動変更されうる
@@ -139,13 +147,10 @@ class PlayerController {
      * コンストラクタ
      * 実際の DPlayer の初期化処理は await init() で行われる
      */
-    constructor(playback_mode: 'Live' | 'Video', canvas_render_mode: boolean = false) {
+    constructor(playback_mode: 'Live' | 'Video') {
 
         // 再生モードをセット
         this.playback_mode = playback_mode;
-
-        // Canvas 描画モードかどうかをセット
-        this.canvas_render_mode = canvas_render_mode;
 
         const player_store = usePlayerStore();
         if (player_store.selected_quality_profile_type !== null) {
@@ -508,6 +513,10 @@ class PlayerController {
                             url: `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/download`,
                         });
                     }
+                    // WebCodecs 自前再生エンジン (hls.js を使わず、HTMLMediaElement を介さずに再生する実験的経路) を使うかどうか
+                    // フィーチャーフラグが有効かつ、この端末が WebCodecs/AudioWorklet に対応している場合のみ使う
+                    const use_webcodecs_engine = settings_store.settings.webcodecs_player_enabled_sources.recorded === true &&
+                        is_webcodecs_engine_supported === true;
                     // 画質リストを作成
                     for (const quality_name of VIDEO_STREAMING_QUALITIES) {
                         // 画質ごとに異なるセッション ID を生成 (セッション ID は UUID の - で区切って一番左側のみを使う)
@@ -516,7 +525,8 @@ class PlayerController {
                         qualities.push({
                             // 1080p-60fps のみ、見栄えの観点から表示上 "1080p (60fps)" と表示する
                             name: quality_name === '1080p-60fps' ? '1080p (60fps)' : quality_name,
-                            type: 'hls',
+                            // 'webcodecs' は DPlayer の customType 拡張点で処理する独自タイプ (setupWebCodecsQuality() 参照)
+                            type: use_webcodecs_engine === true ? 'webcodecs' : 'hls',
                             url: `${streaming_api_base_url}/${build_api_quality(quality_name)}/playlist?session_id=${session_id}&type=master`,
                         });
                     }
@@ -550,6 +560,10 @@ class PlayerController {
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
+                        // 'webcodecs' タイプの画質が選択されたときに DPlayer 本体の MSE 初期化処理を経由せず呼ばれる拡張点
+                        customType: {
+                            webcodecs: (video: HTMLVideoElement, player: DPlayer) => this.setupWebCodecsQuality(video, player),
+                        },
                         thumbnails: tile_info !== null ? {
                             url: `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/thumbnail/tiled`,
                             interval: tile_info.interval_sec,
@@ -1220,11 +1234,6 @@ class PlayerController {
             ];
         }
 
-        // Canvas 描画モードのときだけ、映像を Canvas に転写する CanvasRenderManager を追加する
-        if (this.canvas_render_mode === true) {
-            this.player_managers.push(new CanvasRenderManager(this.player));
-        }
-
         // 登録されている PlayerManager をすべて初期化
         // これにより各 PlayerManager での実際の処理が開始される
         // 同期処理すると時間が掛かるので、並行して実行する
@@ -1305,6 +1314,78 @@ class PlayerController {
                 }
             }
         }
+    }
+
+
+    /**
+     * DPlayer の customType 拡張点から呼ばれる、'webcodecs' タイプの画質の初期化処理
+     * DPlayer 本体の MSE 初期化処理 (initMSE() の switch 文) を経由せず、ここで完全に独自の WebCodecs
+     * 自前再生エンジン (PlaybackEngine) をセットアップし、実 <video> 要素を <canvas> ベースのシムに置き換える
+     *
+     * DPlayer 本体 (node_modules) には一切手を入れず、公式に用意されている customType 拡張点のみを使って実現している
+     * (詳細は client/.claude/plans/ 配下の設計ドキュメント、または本メソッドのコメントを参照)
+     *
+     * @param video この時点で player.video が指している実 <video> 要素 (初回ロード時、または switchQuality() が
+     *   新しく生成した要素。まだ DOM 上には存在するが、このメソッド内で <canvas> に置き換えられ破棄される)
+     * @param player DPlayer のインスタンス
+     */
+    private setupWebCodecsQuality(video: HTMLVideoElement, player: DPlayer): void {
+
+        const master_playlist_url = player.quality?.url;
+        if (master_playlist_url === undefined) {
+            console.error('[PlayerController] setupWebCodecsQuality: no quality URL is available.');
+            return;
+        }
+
+        // switchQuality() 経由で呼ばれた場合、呼び出し前に player.prevVideo / player.switchingQuality が
+        // セットされている (DPlayer 本体の仕様: switchQuality() 140-150行目相当) ため、これで判定できる
+        const is_quality_switch = player.prevVideo !== null;
+        const start_position_seconds = is_quality_switch ? player.prevVideoCurrentTime : 0;
+        const previous_video_element = player.prevVideo;
+        const previous_playback_engine = this.playback_engine;
+
+        // 新しい PlaybackEngine を構築し、video 要素の代わりに canvas ベースのシムを DOM に挿入する
+        const engine = new PlaybackEngine();
+        this.playback_engine = engine;
+        const shim = createVideoElementShim(engine.canvas, engine.mediaClock, (seconds) => {
+            void engine.seek(seconds);
+        });
+        // クラス名は実 video 要素のものをそのまま引き継ぎ、'dplayer-video-current' は確実に付与する
+        // (switchQuality() が生成する新しい video 要素は current:false で生成されるため、ここで明示的に付与する必要がある)
+        shim.className = video.className;
+        shim.classList.add('dplayer-video-current');
+        video.replaceWith(shim);
+        player.video = shim;
+
+        if (is_quality_switch === true) {
+            // DPlayer 本体の switchQuality() は、本来 video の 'canplay' イベントをトリガーに
+            // player.prevVideo の DOM からの除去・switchingQuality フラグの解除・speed の再適用・
+            // 'quality_end' イベントの発火を行うが、video 要素を使わない都合上そのイベントは発火しない
+            // そのため、ここで同じ後処理を手動で行う (DPlayer player.ts の switchQuality() 実装を参照)
+            if (previous_video_element !== null && previous_video_element.parentElement !== null) {
+                previous_video_element.parentElement.removeChild(previous_video_element);
+            }
+            player.prevVideo = null;
+            player.switchingQuality = false;
+            player.container.classList.remove('dplayer-loading');
+            const speed_elem = player.template.settingBox.querySelector<HTMLElement>('.dplayer-setting-speed-current');
+            if (speed_elem?.dataset.speed !== undefined) {
+                player.speed(parseFloat(speed_elem.dataset.speed));
+            }
+            player.events.trigger('quality_end');
+        }
+
+        // プレイリスト取得・再生開始は非同期で行う (customType のハンドラ自体は同期 API のため待たない)
+        void (async () => {
+            try {
+                await engine.loadRecordedVideo(master_playlist_url, start_position_seconds);
+            } catch (error) {
+                console.error('[PlayerController] setupWebCodecsQuality: failed to load recorded video.', error);
+            } finally {
+                // 古いエンジンは新しいエンジンの初回ロードが始まった後に破棄する (前の canvas が一瞬消えるのを避けるため)
+                void previous_playback_engine?.destroy();
+            }
+        })();
     }
 
 
@@ -2078,12 +2159,6 @@ class PlayerController {
             if (deinterlacer instanceof Deinterlacer && deinterlacer.running === true) {
                 return deinterlacer.container;
             }
-            // Canvas 描画モードでは、実際に見えている Canvas の方にクロップ変形を適用する
-            for (const player_manager of this.player_managers) {
-                if (player_manager instanceof CanvasRenderManager && player_manager.active_canvas !== null) {
-                    return player_manager.active_canvas;
-                }
-            }
             return this.player!.video;
         };
         let video_element = get_video_element();
@@ -2494,6 +2569,12 @@ class PlayerController {
         }
 
         // DPlayer 本体を破棄
+        // WebCodecs 自前再生エンジンが稼働中であれば破棄する (AudioContext を含むリソースを解放する)
+        if (this.playback_engine !== null) {
+            await this.playback_engine.destroy();
+            this.playback_engine = null;
+        }
+
         // なぜか例外が出ることがあるので try-catch で囲む
         if (this.player !== null) {
             // プレイヤーの破棄を実行する前に、DPlayer 側に登録された HTMLVideoElement の error イベントハンドラーを全て削除

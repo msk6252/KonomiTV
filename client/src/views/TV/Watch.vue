@@ -132,7 +132,7 @@ export default defineComponent({
             }
 
             // PlayerController を初期化
-            player_controller = new PlayerController('Live', this.$route.meta.canvas_render_mode === true);
+            player_controller = new PlayerController('Live');
             await player_controller.init();
         },
 

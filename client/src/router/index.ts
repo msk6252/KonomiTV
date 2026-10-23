@@ -30,21 +30,6 @@ const router = createRouter({
             component: () => import('@/views/TV/Watch.vue'),
         },
         {
-            // Tesla ブラウザ向けのホームページ (チャンネル一覧)
-            // ここから選択したチャンネルは beforeEach の読み替えにより Tesla 用の視聴ページへ遷移する
-            path: '/tesla/tv/',
-            name: 'Tesla TV Home',
-            component: () => import('@/views/TV/Home.vue'),
-        },
-        {
-            // Tesla ブラウザ向けの視聴ページ (映像を <canvas> に描画する)
-            // それ以外の挙動は通常の視聴ページ (/tv/watch/) と同一
-            path: '/tesla/tv/watch/:display_channel_id',
-            name: 'Tesla TV Watch',
-            component: () => import('@/views/TV/Watch.vue'),
-            meta: {canvas_render_mode: true},
-        },
-        {
             path: '/tv/search',
             name: 'TV Search',
             component: () => import('@/views/TV/Search.vue'),
@@ -192,14 +177,6 @@ const router = createRouter({
     }
 });
 
-// Tesla ブラウザ向けページ (/tesla/...) から通常の視聴ページ (/tv/watch/...) へ遷移しようとした場合は、
-// チャンネル切り替え (ザッピング・ショートカットキー・チャンネルパネルなど) でも Canvas 描画モードを維持するよう Tesla 用ページへ読み替える
-router.beforeEach((to, from) => {
-    if (from.path.startsWith('/tesla/') && to.path.startsWith('/tv/watch/')) {
-        return {path: `/tesla${to.path}`, query: to.query, hash: to.hash};
-    }
-});
-
 // ルーティングの変更時に View Transitions API を適用する
 // ref: https://developer.mozilla.org/ja/docs/Web/API/View_Transitions_API
 router.beforeResolve((to, from, next) => {
@@ -207,7 +184,6 @@ router.beforeResolve((to, from, next) => {
     // to と from の両方のパスがこの prefix で始まる場合は View Transition API を適用しない
     const no_transition_routes = [
         '/tv/watch/',
-        '/tesla/tv/watch/',
         '/videos/watch/',
     ];
     if (document.startViewTransition && !no_transition_routes.some((route) => to.path.startsWith(route) && from.path.startsWith(route))) {
