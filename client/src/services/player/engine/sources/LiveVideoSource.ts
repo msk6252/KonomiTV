@@ -125,7 +125,9 @@ class LiveVideoSource implements IEngineSource {
         }
         // ライブにはシークという概念は無いが、「再生に必要な最初のデータが揃った」タイミングの通知として
         // onSeeked() コールバックを再利用する (録画視聴でのプリロール完了通知と同じ意味合い)
-        if (this.hasSignaledReady === false && result.videoChunks.length > 0) {
+        // 'key' (キーフレーム) を含むチャンクが実際に来るまでは、VideoDecoder がまだ configure() されておらず
+        // 描画できる状態になっていないため、delta のみのチャンクでは準備完了を通知しない
+        if (this.hasSignaledReady === false && result.videoChunks.some(({ chunk }) => chunk.type === 'key')) {
             this.hasSignaledReady = true;
             this.callbacks.onSeeked(0);
         }

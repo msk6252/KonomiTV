@@ -1776,6 +1776,11 @@ class PlayerController {
                 await Utils.sleep(15);
                 if (this.destroyed === true || this.player === null) return;
                 if (player_store.live_stream_status === 'ONAir' && player_store.is_video_buffering === true && on_canplay_called === false) {
+                    // JS 例外を経由しないため MediaClock.setError() 側のエラー報告には乗らない
+                    // (WebCodecs エンジン使用時は、ここが「canplay が一度も発火しなかった」ことを示す唯一の手がかりになる)
+                    reportClientError('WebCodecsPlayer/PlayerController/canplayTimeout',
+                        new Error(`canplay(through) did not fire within 15s. readyState=${this.player.video.readyState}, ` +
+                            `engine=${this.playback_engine !== null ? 'webcodecs' : 'legacy'}`));
                     player_store.event_emitter.emit('PlayerRestartRequired', {
                         message: '再生開始までに時間が掛かっています。プレイヤーを再起動しています…',
                     });
