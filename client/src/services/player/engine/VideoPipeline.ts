@@ -22,14 +22,23 @@ class VideoPipeline {
         this.maxQueueLength = length;
     }
 
-    /** 映像デコーダーを (再) 構築する。コーデック・解像度が変わった場合に呼ぶ */
+    /**
+     * 映像デコーダーを (再) 構築する。コーデック・解像度が変わった場合に呼ぶ
+     * デマルチプレクサ側の解析ミス等で不正な config が渡ってきても、デコーダー未構成のまま
+     * (= このコーデック変更は無視される) にするだけで、再生全体を落とさない
+     */
     public configure(config: VideoDecoderConfig): void {
         this.closeDecoder();
-        this.decoder = new VideoDecoder({
-            output: (frame) => this.onFrame(frame),
-            error: (error) => console.error('[VideoPipeline] VideoDecoder error:', error),
-        });
-        this.decoder.configure(config);
+        try {
+            const decoder = new VideoDecoder({
+                output: (frame) => this.onFrame(frame),
+                error: (error) => console.error('[VideoPipeline] VideoDecoder error:', error),
+            });
+            decoder.configure(config);
+            this.decoder = decoder;
+        } catch (error) {
+            console.error('[VideoPipeline] Failed to configure VideoDecoder:', config, error);
+        }
     }
 
     private onFrame(frame: VideoFrame): void {

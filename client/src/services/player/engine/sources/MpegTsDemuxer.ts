@@ -289,8 +289,13 @@ class MpegTsDemuxer {
             this.videoPid = null;
             this.videoStreamType = null;
             this.audioPid = null;
+            // セグメントは自己完結しているため、呼び出しをまたいで PES の断片を持ち越す必要が無い
+            this.pesAssembly.clear();
         }
-        this.pesAssembly.clear();
+        // continuous (ライブ) モードでは、1回の呼び出し (= fetch() で読み取った任意サイズのチャンク) の境界は
+        // TS パケットや PES パケットの境界と全く無関係なため、pesAssembly をリセットしてはならない
+        // (リセットすると、ちょうどチャンク境界をまたいで分割された PES のデータが毎回破損し、
+        // 結果として壊れた SPS 等から不正なコーデック文字列が作られ VideoDecoder.configure() が例外を投げる)
         this.finishedPes = [];
 
         const packetCount = Math.floor(data.length / TS_PACKET_LENGTH);
@@ -303,12 +308,18 @@ class MpegTsDemuxer {
             }
             this.handlePacket(data, offset);
         }
-        // 末尾で未確定のまま残っている PES (次の PUSI が来る前にセグメントが終わったもの) を確定させる
-        if (this.videoPid !== null) {
-            this.finalizePes(this.videoPid);
-        }
-        if (this.audioPid !== null) {
-            this.finalizePes(this.audioPid);
+        if (this.continuous === false) {
+            // 録画視聴: セグメントは自己完結しているため、末尾で未確定のまま残っている PES
+            // (次の PUSI が来る前にセグメントが終わったもの) をここで確定させる
+            // continuous (ライブ) モードではこれをやってはならない: まだ完成していない PES を
+            // 「完成した」ことにして確定してしまうと、続きのデータが次の呼び出しで届いた時点で
+            // 対応するアセンブリが既に無くなっており、新しい PES の先頭と誤認されて破損する
+            if (this.videoPid !== null) {
+                this.finalizePes(this.videoPid);
+            }
+            if (this.audioPid !== null) {
+                this.finalizePes(this.audioPid);
+            }
         }
 
         return this.buildResult(nominalSegmentStartSeconds);
@@ -373,6 +384,12 @@ class MpegTsDemuxer {
             // 対応する開始パケットが無い (セグメント先頭で前のセグメントの続きが来た等) 継続パケットは捨てる
             if (chunks) {
                 chunks.push(payload);
+                // continuous (ライブ) モードで PUSI が来ないまま (壊れたストリーム等で) 延々と続いた場合、
+                // 無制限にメモリを溜め込まないための安全弁 (通常の映像/音声フレームはここまで大きくならない)
+                const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                if (totalLength > 2 * 1024 * 1024) {
+                    this.pesAssembly.delete(pid);
+                }
             }
         }
     }

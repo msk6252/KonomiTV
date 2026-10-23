@@ -3,7 +3,7 @@ import MediaClock from '@/services/player/engine/MediaClock';
 
 // Vite の `new URL(..., import.meta.url)` パターンで AudioWorklet 用スクリプトを解決する
 // (worker-modules.d.ts 的な別プログラムとして扱われ、メインスレッドの DOM lib とは型を共有しない)
-const WORKLET_URL = new URL('./worklets/pcm-ring-buffer-processor.ts', import.meta.url);
+const WORKLET_URL = new URL('./worklets/pcm-ring-buffer-processor.js', import.meta.url);
 
 /**
  * AAC 等のエンコード済み音声チャンクを WebCodecs の AudioDecoder でデコードし、
@@ -58,11 +58,19 @@ class AudioPipeline {
             );
         }
 
-        this.decoder = new AudioDecoder({
-            output: (audioData) => this.onAudioData(audioData),
-            error: (error) => console.error('[AudioPipeline] AudioDecoder error:', error),
-        });
-        this.decoder.configure(config);
+        // デマルチプレクサ側の解析ミス等で不正な config が渡ってきても、デコーダー未構成のまま
+        // (= このコーデック変更は無視される) にするだけで、再生全体を落とさない
+        try {
+            const decoder = new AudioDecoder({
+                output: (audioData) => this.onAudioData(audioData),
+                error: (error) => console.error('[AudioPipeline] AudioDecoder error:', error),
+            });
+            decoder.configure(config);
+            this.decoder = decoder;
+        } catch (error) {
+            console.error('[AudioPipeline] Failed to configure AudioDecoder:', config, error);
+            return;
+        }
         this.setupWorkletNode();
     }
 
