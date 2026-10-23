@@ -1,4 +1,7 @@
 
+import reportClientError from '@/utils/ClientErrorReporter';
+
+
 /**
  * エンコード済み映像チャンクを WebCodecs の VideoDecoder でデコードし、
  * 提示待ちの VideoFrame をタイムスタンプ順にキューイングするパイプライン
@@ -10,6 +13,11 @@ class VideoPipeline {
 
     private decoder: VideoDecoder | null = null;
     private readonly queue: VideoFrame[] = [];
+
+    // configure()/flush() の直後は必ずキーフレームを最初に decode() しなければならない (WebCodecs の仕様)
+    // ライブ視聴では「configure() を発火させたキーフレームより前に、同じチャンク内で見つかった旧 GOP の
+    // 末尾の delta フレームが先に decode() に渡ってしまう」順序問題が起こりうるため、ここで安全に読み捨てる
+    private awaitingKeyFrame = true;
 
     // キューの最大保持数 (ライブは低遅延優先で短く、録画は安定性優先で長く、JitterBuffer のプロファイルに応じて渡される)
     private maxQueueLength: number;
@@ -32,12 +40,13 @@ class VideoPipeline {
         try {
             const decoder = new VideoDecoder({
                 output: (frame) => this.onFrame(frame),
-                error: (error) => console.error('[VideoPipeline] VideoDecoder error:', error),
+                error: (error) => reportClientError('WebCodecsPlayer/VideoPipeline/decode', error),
             });
             decoder.configure(config);
             this.decoder = decoder;
+            this.awaitingKeyFrame = true;
         } catch (error) {
-            console.error('[VideoPipeline] Failed to configure VideoDecoder:', config, error);
+            reportClientError('WebCodecsPlayer/VideoPipeline', error);
         }
     }
 
@@ -54,7 +63,19 @@ class VideoPipeline {
         if (!this.decoder || this.decoder.state !== 'configured') {
             return;
         }
-        this.decoder.decode(new EncodedVideoChunk(chunkInit));
+        if (this.awaitingKeyFrame === true) {
+            if (chunkInit.type !== 'key') {
+                // configure()/flush() 直後にキーフレームが来るまで delta フレームは安全に読み捨てる
+                // (WebCodecs は configure() 直後に delta を decode() すると例外を投げるため)
+                return;
+            }
+            this.awaitingKeyFrame = false;
+        }
+        try {
+            this.decoder.decode(new EncodedVideoChunk(chunkInit));
+        } catch (error) {
+            reportClientError('WebCodecsPlayer/VideoPipeline', error);
+        }
     }
 
     /** デコーダー内部のデコード待ちキューの長さ (バックプレッシャー判定用) */
@@ -92,6 +113,8 @@ class VideoPipeline {
             } catch {
                 // flush 中の close/configure 変更によるエラーは無視してよい
             }
+            // flush() 直後も configure() 直後と同様、次に decode() できるのはキーフレームのみ
+            this.awaitingKeyFrame = true;
         }
         this.clearQueue();
     }

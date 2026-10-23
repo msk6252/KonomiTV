@@ -1,5 +1,6 @@
 
 import IPlaybackEngine from '@/services/player/engine/IPlaybackEngine';
+import reportClientError from '@/utils/ClientErrorReporter';
 
 
 /**
@@ -284,6 +285,8 @@ class MediaClock extends EventTarget implements IPlaybackEngine {
     public setError(code: number, message: string): void {
         // MediaError は仕様上コンストラクタが公開されていないため、同じ形を持つ素のオブジェクトを充てる
         this._error = { code, message } as MediaError;
+        // 開発者ツールを開けない環境でもデバッグできるよう、サーバーログにも転送する
+        reportClientError('WebCodecsPlayer/MediaClock', new Error(message));
         this.dispatchEvent(new Event('error'));
     }
 

@@ -775,3 +775,15 @@ class VersionInformation(BaseModel):
     environment: Literal['Windows', 'Linux', 'Linux-Docker', 'Linux-ARM']
     backend: Literal['EDCB', 'Mirakurun']
     encoder: Literal['FFmpeg', 'QSVEncC', 'NVEncC', 'VCEEncC', 'rkmppenc']
+
+# ***** クライアントエラー報告 *****
+
+class ClientErrorReport(BaseModel):
+    # エラーが発生した機能・コンポーネント名 (ログでの絞り込み用、例: "WebCodecsPlayer")
+    context: str
+    # エラーメッセージ
+    message: str
+    # スタックトレース (取得できない場合は None)
+    stack: str | None = None
+    # エラー発生時の User-Agent (Tesla ブラウザ等、開発者ツールでの確認が難しい環境の特定に使う)
+    user_agent: str | None = None

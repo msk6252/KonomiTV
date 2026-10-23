@@ -27,6 +27,7 @@ import useChannelsStore from '@/stores/ChannelsStore';
 import usePlayerStore from '@/stores/PlayerStore';
 import useSettingsStore, { LiveStreamingQuality, LIVE_STREAMING_QUALITIES, VideoStreamingQuality, VIDEO_STREAMING_QUALITIES } from '@/stores/SettingsStore';
 import Utils, { dayjs, PlayerUtils } from '@/utils';
+import reportClientError from '@/utils/ClientErrorReporter';
 
 
 // WebCodecs による <video> タグを使わない自前再生エンジンが、この端末で利用可能かどうか
@@ -1424,7 +1425,7 @@ class PlayerController {
                     await engine.loadRecordedVideo(quality_url, start_position_seconds);
                 }
             } catch (error) {
-                console.error('[PlayerController] setupWebCodecsQuality: failed to load stream.', error);
+                reportClientError('WebCodecsPlayer/PlayerController/setupWebCodecsQuality', error);
             } finally {
                 // 古いエンジンは新しいエンジンの初回ロードが始まった後に破棄する (前の canvas が一瞬消えるのを避けるため)
                 void previous_playback_engine?.destroy();

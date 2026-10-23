@@ -162,6 +162,28 @@ def LogStreamAPI(
 
 
 @router.post(
+    '/client-error',
+    summary = 'クライアントエラー報告 API',
+    status_code = status.HTTP_204_NO_CONTENT,
+)
+async def ClientErrorReportAPI(
+    client_error: schemas.ClientErrorReport,
+):
+    """
+    クライアント (ブラウザ) 側で発生したエラーを報告し、サーバーログに記録する。<br>
+    Tesla ブラウザ等、開発者ツールでの確認が難しい環境でのデバッグを補助する目的で用意している。<br>
+    このメンテナンス機能は管理者ユーザーでなくてもアクセスできる。
+    """
+
+    log_message = f'[ClientErrorReportAPI][{client_error.context}] {client_error.message}'
+    if client_error.user_agent is not None:
+        log_message += f'\nUser-Agent: {client_error.user_agent}'
+    if client_error.stack is not None:
+        log_message += f'\n{client_error.stack}'
+    logging.error(log_message)
+
+
+@router.post(
     '/update-database',
     summary = 'データベース更新 API',
     status_code = status.HTTP_204_NO_CONTENT,
