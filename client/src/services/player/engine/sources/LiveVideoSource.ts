@@ -39,6 +39,8 @@ class LiveVideoSource implements IEngineSource {
     private destroyed = false;
     /** 最初の映像チャンクが届いたときに一度だけ再生準備完了を通知するためのフラグ */
     private hasSignaledReady = false;
+    /** これまでに届いた映像チャンクの最新タイムスタンプ (秒) 。onBufferedRangesChanged() の報告に使う */
+    private latestVideoTimestampSeconds = 0;
 
     constructor(streamUrl: string, callbacks: IEngineSourceCallbacks) {
         this.streamUrl = streamUrl;
@@ -119,9 +121,19 @@ class LiveVideoSource implements IEngineSource {
         }
         for (const { chunk } of result.videoChunks) {
             this.callbacks.onVideoChunk(chunk);
+            // チャンクの timestamp は EncodedVideoChunkInit の仕様通りマイクロ秒なので、秒に変換して保持する
+            this.latestVideoTimestampSeconds = Math.max(this.latestVideoTimestampSeconds, chunk.timestamp / 1e6);
         }
         for (const { chunk } of result.audioChunks) {
             this.callbacks.onAudioChunk(chunk);
+        }
+        // PlayerController.ts の再生バッファ調整ロジック (getPlaybackBufferSeconds()) が
+        // player.video.buffered を参照するため、ライブでも最低限のバッファ済み範囲を報告する必要がある
+        // (これを報告しないと buffered が常に空のままとなり、再生バッファが一定秒数を超えるまで待つループが
+        // 永久に終了せず、ローディング画面が解除されなくなる)
+        // ライブは常に先頭 (anchor=0) から現在までを再生可能範囲とみなす
+        if (result.videoChunks.length > 0) {
+            this.callbacks.onBufferedRangesChanged([{ start: 0, end: this.latestVideoTimestampSeconds }]);
         }
         // ライブにはシークという概念は無いが、「再生に必要な最初のデータが揃った」タイミングの通知として
         // onSeeked() コールバックを再利用する (録画視聴でのプリロール完了通知と同じ意味合い)

@@ -164,9 +164,14 @@ class MediaClock extends EventTarget implements IPlaybackEngine {
         if (this._paused === false) {
             return;
         }
-        // 自動再生ポリシーで suspended になっている場合はユーザー操作起点の play() で resume する
+        // 自動再生ポリシーで suspended になっている場合はユーザー操作起点の play() で resume を試みるが、
+        // ユーザー操作を一度も経ていないページ (Tesla 車載ブラウザでの自動画質選択等) では resume() が
+        // ブラウザの自動再生ポリシーにブロックされたまま Promise が解決しないことがあるため、ここで await しない
+        // (await してしまうと loadLiveStream()/loadRecordedVideo() の呼び出し元が永久に止まり、
+        // 実際には取得できているはずの映像データも一切描画されないままローディング画面が解除されなくなる)
+        // resume に成功すればそのまま音声が鳴り始め、失敗してもその後のユーザー操作で再度 resume が試行される
         if (this.audioContext.state === 'suspended') {
-            await this.audioContext.resume();
+            void this.audioContext.resume().catch(() => { /* 自動再生ポリシーによる拒否は正常系として無視する */ });
         }
         this.rebaseToCurrent();
         this._paused = false;
