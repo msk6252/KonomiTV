@@ -154,8 +154,12 @@ class LiveEncodingTask:
         options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
 
         # ストリームのマッピング
-        ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
-        options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
+        if QUALITY[quality].is_video_only is True:
+            # Tesla 車載ブラウザ向け画質では、音声は別ストリーム ('tesla-audio') で配信するため映像のみマッピングする
+            options.append('-map 0:v:0 -map 0:d? -ignore_unknown')
+        else:
+            ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
+            options.append('-map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:d? -ignore_unknown')
 
         # フラグ
         ## 主に FFmpeg の起動を高速化するための設定
@@ -176,7 +180,11 @@ class LiveEncodingTask:
         ## ビットレートと品質
         options.append(f'-flags +cgop -vb {QUALITY[quality].video_bitrate} -maxrate {QUALITY[quality].video_bitrate_max}')
         options.append('-aspect 16:9' if use_vaapi else '-preset veryfast -aspect 16:9')  # [VAAPI-PATCH]
-        if QUALITY[quality].is_hevc is True and not use_vaapi:
+        if QUALITY[quality].profile == 'baseline':
+            # Broadway.js など WebAssembly 製ソフトウェアデコーダでもデコードできるよう、
+            # CABAC・B フレームを使わない baseline プロファイルを明示的に指定する
+            options.append('-profile:v baseline')
+        elif QUALITY[quality].is_hevc is True and not use_vaapi:
             options.append('-profile:v main')
         else:
             options.append('-profile:v high')
@@ -216,11 +224,58 @@ class LiveEncodingTask:
                     options.append(f'-r 30000/1001 -g {int(gop_length_second * 30)}')
 
         # 音声
-        ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
-        options.append(f'-acodec aac -aac_coder twoloop -ac 2 -ab {QUALITY[quality].audio_bitrate} -ar 48000 -af volume=2.0')
+        if QUALITY[quality].is_video_only is False:
+            ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
+            options.append(f'-acodec aac -aac_coder twoloop -ac 2 -ab {QUALITY[quality].audio_bitrate} -ar 48000 -af volume=2.0')
 
         # 出力
         options.append('-y -f mpegts')  # MPEG-TS 出力ということを明示
+        options.append('pipe:1')  # 標準出力へ出力
+
+        # オプションをスペースで区切って配列にする
+        result: list[str] = []
+        for option in options:
+            result += option.split(' ')
+
+        return result
+
+
+    def buildFFmpegOptionsForAudioOnly(self) -> list[str]:
+        """
+        FFmpeg に渡すオプションを組み立てる (Tesla 車載ブラウザ向けの音声のみストリーム用)
+        Tesla 車載ブラウザは Drive Mode 中に <video> 要素を一時停止してしまうが <audio> 要素は一時停止しないため、
+        映像とは別の plain <audio> 要素で再生できる音声のみのストリームを配信する必要がある
+        ADTS 生 AAC は <audio> 要素でのブラウザ互換性が不安定なため、MP3 (libmp3lame) で出力する
+
+        buildFFmpegOptionsForRadio() と同様、音声の品質は変えたところでほとんど差がないため固定にしている
+
+        Returns:
+            list[str]: FFmpeg に渡すオプションが連なる配列
+        """
+
+        # オプションの入る配列
+        options: list[str] = []
+
+        # 入力
+        ## -analyzeduration をつけることで、ストリームの分析時間を短縮できる
+        analyzeduration = round(500000 + (self._retry_count * 200000))  # リトライ回数に応じて少し増やす
+        options.append(f'-f mpegts -analyzeduration {analyzeduration} -i pipe:0')
+
+        # ストリームのマッピング
+        ## 映像は別ストリーム ('tesla-480p') で配信するため、音声のみマッピングする
+        options.append('-map 0:a:0 -ignore_unknown')
+
+        # フラグ
+        ## 主に FFmpeg の起動を高速化するための設定
+        max_interleave_delta = round(500 + (self._retry_count * 100))
+        options.append(f'-fflags nobuffer -flags low_delay -max_delay 250000 -max_interleave_delta {max_interleave_delta}K -threads 0')
+
+        # 音声
+        ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
+        options.append('-acodec libmp3lame -ac 2 -ab 192K -ar 48000 -af volume=2.0')
+
+        # 出力
+        options.append('-y -f mp3')  # MP3 出力ということを明示
         options.append('pipe:1')  # 標準出力へ出力
 
         # オプションをスペースで区切って配列にする
@@ -332,9 +387,10 @@ class LiveEncodingTask:
             options.append('--adapt-resolution 1920x1080')
 
         # ストリームのマッピング
-        ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
-        ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
-        options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
+        if QUALITY[quality].is_video_only is False:
+            ## 音声切り替えのため、主音声・副音声両方をエンコード後の TS に含む
+            ## 音声が 5.1ch かどうかに関わらず、ステレオにダウンミックスする
+            options.append('--audio-stream 1?:stereo --audio-stream 2?:stereo --data-copy timed_id3')
 
         # フラグ
         ## 主に HWEncC の起動を高速化するための設定
@@ -391,7 +447,11 @@ class LiveEncodingTask:
             options.append('--preset balanced')
         elif encoder_type == 'rkmppenc':
             options.append('--preset best')
-        if QUALITY[quality].is_hevc is True:
+        if QUALITY[quality].profile == 'baseline':
+            # Broadway.js など WebAssembly 製ソフトウェアデコーダでもデコードできるよう、
+            # CABAC・B フレームを使わない baseline プロファイルを明示的に指定する
+            options.append('--profile baseline')
+        elif QUALITY[quality].is_hevc is True:
             options.append('--profile main')
         else:
             options.append('--profile high')
@@ -459,8 +519,9 @@ class LiveEncodingTask:
         options.append(f'--output-res {video_width}x{video_height}')
 
         # 音声
-        options.append(f'--audio-codec aac:aac_coder=twoloop --audio-bitrate {QUALITY[quality].audio_bitrate}')
-        options.append('--audio-samplerate 48000 --audio-filter volume=2.0 --audio-ignore-decode-error 30')
+        if QUALITY[quality].is_video_only is False:
+            options.append(f'--audio-codec aac:aac_coder=twoloop --audio-bitrate {QUALITY[quality].audio_bitrate}')
+            options.append('--audio-samplerate 48000 --audio-filter volume=2.0 --audio-ignore-decode-error 30')
 
         # 出力
         options.append('--output-format mpegts')  # MPEG-TS 出力ということを明示
@@ -693,8 +754,8 @@ class LiveEncodingTask:
         # フル HD 放送が行われているチャンネルかを取得
         is_fullhd_channel = self.isFullHDChannel(channel.network_id, channel.service_id)
 
-        ## ラジオチャンネルでは HW エンコードの意味がないため、FFmpeg に固定する
-        if channel.is_radiochannel is True:
+        ## ラジオチャンネル・Tesla 車載ブラウザ向け音声のみ画質では HW エンコードの意味がないため、FFmpeg に固定する
+        if channel.is_radiochannel is True or self.live_stream.quality == 'tesla-audio':
             ENCODER_TYPE = 'FFmpeg'
 
         # オリジナル画質 ("original") 指定時のみ、Python で単に左から右にパイプで流すだけの無変換プロセスを「エンコーダー」として起動する
@@ -741,9 +802,11 @@ class LiveEncodingTask:
         elif ENCODER_TYPE == 'FFmpeg':
 
             # オプションを取得
-            # ラジオチャンネルかどうかでエンコードオプションを切り替え
+            # ラジオチャンネルかどうか・Tesla 車載ブラウザ向け音声のみ画質かどうかでエンコードオプションを切り替え
             if channel.is_radiochannel is True:
                 encoder_options = self.buildFFmpegOptionsForRadio()
+            elif self.live_stream.quality == 'tesla-audio':
+                encoder_options = self.buildFFmpegOptionsForAudioOnly()
             else:
                 assert self.live_stream.quality != 'original'
                 encoder_options = self.buildFFmpegOptions(self.live_stream.quality, channel.type, is_fullhd_channel)

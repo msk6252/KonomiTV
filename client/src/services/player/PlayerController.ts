@@ -11,7 +11,10 @@ import { watch } from 'vue';
 import APIClient from '@/services/APIClient';
 import OfflineVideos from '@/services/OfflineVideos';
 import CustomBufferController from '@/services/player/CustomBufferController';
+import AudioElementPlaybackEngineAdapter from '@/services/player/engine/AudioElementPlaybackEngineAdapter';
+import loadBroadwayPlayer from '@/services/player/engine/BroadwayLoader';
 import PlaybackEngine from '@/services/player/engine/PlaybackEngine';
+import BroadwayLiveVideoSource from '@/services/player/engine/sources/BroadwayLiveVideoSource';
 import createVideoElementShim from '@/services/player/engine/VideoElementShim';
 import CanvasRenderManager from '@/services/player/managers/CanvasRenderManager';
 import CaptureManager from '@/services/player/managers/CaptureManager';
@@ -35,6 +38,11 @@ import reportClientError from '@/utils/ClientErrorReporter';
 // フィーチャーフラグが有効でも従来の DPlayer + <video> + MSE 経路にフォールバックする
 const is_webcodecs_engine_supported = typeof VideoDecoder !== 'undefined' &&
     typeof AudioDecoder !== 'undefined' && typeof AudioWorkletNode !== 'undefined';
+
+// Broadway.js (H.264 Baseline Profile 用 WebAssembly ソフトウェアデコーダ) による Canvas 描画エンジンが、
+// この端末で利用可能かどうか。Tesla 車載ブラウザのように WebCodecs が無い環境向けの第二候補エンジンで、
+// WebAssembly が動けば原理的に動作する (madpowah/tesla-video-drive の実機プローブでも WebAssembly は利用可能と確認済み)
+const is_broadway_engine_supported = typeof WebAssembly !== 'undefined';
 
 // デバイスのデコーダーが自動でのデインタレースに対応しているかを取得
 // この判定はデバイス単位で不変のため、初回ロード時に1回だけ実行して共有する
@@ -90,6 +98,12 @@ class PlayerController {
     // WebCodecs による自前再生エンジンのインスタンス (type: 'webcodecs' の画質が選択されている間のみ存在する)
     // 画質切り替え等で破棄・再構築されるため、必ず setupWebCodecsQuality() 経由でのみ差し替えること
     private playback_engine: PlaybackEngine | null = null;
+
+    // Broadway.js による自前再生エンジンのインスタンス群 (type: 'broadway' の画質が選択されている間のみ存在する)
+    // WebCodecs 非対応の Canvas 描画モード端末 (Tesla 車載ブラウザ実機等) 向けの第二候補エンジン
+    // 画質切り替え等で破棄・再構築されるため、必ず setupBroadwayQuality() 経由でのみ差し替えること
+    private broadway_source: BroadwayLiveVideoSource | null = null;
+    private broadway_audio: HTMLAudioElement | null = null;
 
     // それぞれの PlayerManager のインスタンスのリスト
     private player_managers: PlayerManager[] = [];
@@ -432,15 +446,30 @@ class PlayerController {
                     // 一切使わない WebCodecs 自前再生エンジンを使う。MPEG-2 は WebCodecs の VideoDecoder が
                     // 対応していないコーデックのため、Original (MPEG-2) 画質はこのモードでは選択肢に含めない
                     const use_webcodecs_engine = this.canvas_render_mode === true && is_webcodecs_engine_supported === true;
+                    // WebCodecs が使えない Canvas 描画モード端末 (= 実機の Tesla 車載ブラウザがこれに該当する) では、
+                    // 代わりに Broadway.js (H.264 Baseline Profile 用 WebAssembly ソフトウェアデコーダ) による
+                    // Canvas 描画エンジンを使う。これは専用の 'tesla-480p' (映像のみ) 画質1つだけを使う固定経路のため、
+                    // 通常の画質ラダーではなく単一のエントリをユーザーの選択肢として提供する
+                    const use_broadway_engine = this.canvas_render_mode === true &&
+                        use_webcodecs_engine === false && is_broadway_engine_supported === true;
+                    const broadway_quality_name = 'Tesla (H.264 Baseline)';
                     // ラジオチャンネルの場合
                     // API が受け付ける画質の値は通常のチャンネルと同じだが (手抜き…)、実際の画質は 48KHz/192kbps で固定される
                     // ラジオチャンネルの場合は、1080p と渡しても 48kHz/192kbps 固定の音声だけの MPEG-TS が配信される
-                    // (ラジオは映像が無く WebCodecs エンジンの前提と合わないため、Canvas 描画モードでも従来の mpegts.js を使う)
+                    // (ラジオは映像が無く WebCodecs/Broadway エンジンの前提と合わないため、Canvas 描画モードでも従来の mpegts.js を使う)
                     if (channels_store.channel.current.is_radiochannel === true) {
                         qualities.push({
                             name: '48kHz/192kbps',
                             type: 'mpegts',
                             url: `${streaming_api_base_url}/1080p/mpegts`,
+                        });
+                    // Broadway.js エンジンを使う場合: 専用の tesla-480p 画質1つだけを選択肢とする
+                    } else if (use_broadway_engine === true) {
+                        qualities.push({
+                            name: broadway_quality_name,
+                            // 'broadway' は DPlayer の customType 拡張点で処理する独自タイプ (setupBroadwayQuality() 参照)
+                            type: 'broadway',
+                            url: `${streaming_api_base_url}/tesla-480p/mpegts`,
                         });
                     // 通常のチャンネルの場合
                     } else {
@@ -494,13 +523,18 @@ class PlayerController {
                     if (channels_store.channel.current.is_radiochannel) {
                         default_quality = '48kHz/192kbps';
                     }
+                    // Broadway.js エンジン使用時は選択肢が1つしかないため、画質プロファイルの内容に関わらず常に固定する
+                    if (use_broadway_engine === true) {
+                        default_quality = broadway_quality_name;
+                    }
                     return {
                         quality: qualities,
                         defaultQuality: default_quality,
-                        // 'webcodecs' タイプの画質が選択されたときに DPlayer 本体の MSE 初期化処理を経由せず呼ばれる拡張点
-                        // (Canvas 描画モード (Tesla ブラウザ向け) で WebCodecs が使える場合のみ実際に使われる)
+                        // 'webcodecs'/'broadway' タイプの画質が選択されたときに DPlayer 本体の MSE 初期化処理を
+                        // 経由せず呼ばれる拡張点 (Canvas 描画モード (Tesla ブラウザ向け) でのみ実際に使われる)
                         customType: {
                             webcodecs: (video: HTMLVideoElement, player: DPlayer) => this.setupWebCodecsQuality(video, player),
+                            broadway: (video: HTMLVideoElement, player: DPlayer) => this.setupBroadwayQuality(video, player),
                         },
                     };
 
@@ -593,8 +627,11 @@ class PlayerController {
                         quality: qualities,
                         defaultQuality: default_quality,
                         // 'webcodecs' タイプの画質が選択されたときに DPlayer 本体の MSE 初期化処理を経由せず呼ばれる拡張点
+                        // ('broadway' は Canvas 描画モード (Live 視聴) 専用で録画再生では使われないが、
+                        // customType オブジェクトの型をライブ視聴側と揃えるために同じキーを持たせている)
                         customType: {
                             webcodecs: (video: HTMLVideoElement, player: DPlayer) => this.setupWebCodecsQuality(video, player),
+                            broadway: (video: HTMLVideoElement, player: DPlayer) => this.setupBroadwayQuality(video, player),
                         },
                         thumbnails: tile_info !== null ? {
                             url: `${Utils.api_base_url}/videos/${player_store.recorded_program.id}/thumbnail/tiled`,
@@ -1267,10 +1304,11 @@ class PlayerController {
         }
 
         // Canvas 描画モードのときだけ、映像を Canvas に転写する CanvasRenderManager を追加する
-        // ただし WebCodecs 自前再生エンジンが既に稼働している (= setupWebCodecsQuality() が呼ばれ、
-        // player.video は既に canvas ベースのシムに置き換わっている) 場合は不要かつ二重描画になるため追加しない
-        // (WebCodecs 非対応ブラウザ・ラジオチャンネル等で WebCodecs エンジンが使われなかった場合のフォールバックとして働く)
-        if (this.canvas_render_mode === true && this.playback_engine === null) {
+        // ただし WebCodecs/Broadway.js のいずれかの自前再生エンジンが既に稼働している (= setupWebCodecsQuality()/
+        // setupBroadwayQuality() が呼ばれ、player.video は既に canvas ベースのシムに置き換わっている) 場合は
+        // 不要かつ二重描画になるため追加しない
+        // (WebCodecs・Broadway.js のいずれも使えないブラウザ・ラジオチャンネル等でのフォールバックとして働く)
+        if (this.canvas_render_mode === true && this.playback_engine === null && this.broadway_source === null) {
             this.player_managers.push(new CanvasRenderManager(this.player));
         }
 
@@ -1429,6 +1467,117 @@ class PlayerController {
             } finally {
                 // 古いエンジンは新しいエンジンの初回ロードが始まった後に破棄する (前の canvas が一瞬消えるのを避けるため)
                 void previous_playback_engine?.destroy();
+            }
+        })();
+    }
+
+
+    /**
+     * DPlayer の customType 拡張点から呼ばれる、'broadway' タイプの画質の初期化処理
+     * WebCodecs が使えない Canvas 描画モード端末 (Tesla 車載ブラウザ実機等) 向けの第二候補エンジンで、
+     * Broadway.js (H.264 Baseline Profile 用 WebAssembly ソフトウェアデコーダ) を使って <canvas> に直接描画する
+     *
+     * setupWebCodecsQuality() と異なり、以下の構造上の違いがある:
+     * - Broadway.js の <script> 読み込みが非同期のため、video 要素の置き換え自体も非同期で行う
+     *   (初回のみ発生する一度だけのコストで、以降は loadBroadwayPlayer() がキャッシュした結果を即座に返す)
+     * - 映像の再生時刻管理 (MediaClock 相当) を持たず、別ストリーム ('tesla-audio') を再生する実在の
+     *   <audio> 要素が再生制御の実体を持つ (AudioElementPlaybackEngineAdapter が IPlaybackEngine として委譲する)
+     * - 'broadway' の画質は1つしか存在しない (quality list 構築側の仕様) ため、switchQuality() 経由で
+     *   呼ばれるケースは実質発生しないが、setupWebCodecsQuality() と対称な後処理は念のため用意しておく
+     *
+     * @param video この時点で player.video が指している実 <video> 要素
+     * @param player DPlayer のインスタンス
+     */
+    private setupBroadwayQuality(video: HTMLVideoElement, player: DPlayer): void {
+
+        // tesla-480p (映像のみ) ストリームの URL
+        const video_quality_url = player.quality?.url;
+        if (video_quality_url === undefined) {
+            console.error('[PlayerController] setupBroadwayQuality: no quality URL is available.');
+            return;
+        }
+        // 対になる音声のみストリーム ('tesla-audio') の URL を、映像側の URL から機械的に組み立てる
+        // (LiveAudioStreamAPI 側のパス構造 /{display_channel_id}/{quality}/audio に対応する)
+        const audio_quality_url = video_quality_url.replace(/\/tesla-480p\/mpegts$/, '/tesla-audio/audio');
+
+        const is_quality_switch = player.prevVideo !== null;
+        const previous_video_element = player.prevVideo;
+        const previous_broadway_source = this.broadway_source;
+        const previous_broadway_audio = this.broadway_audio;
+
+        // 音声のみストリームを再生する実 <audio> 要素を作成する
+        // Tesla 車載ブラウザは Drive Mode 中に <video> 要素を一時停止するが <audio> 要素は一時停止しないため、
+        // 映像 (Broadway.js + canvas) とは完全に独立した実体として再生させる
+        const audio = document.createElement('audio');
+        audio.style.display = 'none';
+        audio.src = audio_quality_url;
+        player.container.appendChild(audio);
+        this.broadway_audio = audio;
+        const audio_adapter = new AudioElementPlaybackEngineAdapter(audio);
+
+        const player_store = usePlayerStore();
+
+        // Broadway.js の <script> 読み込み (初回のみ) と Player インスタンスの構築、
+        // および video 要素から canvas ベースのシムへの置き換えは、スクリプト読み込みが完了してから行う
+        void (async () => {
+            try {
+                const BroadwayPlayerCtor = await loadBroadwayPlayer();
+                const broadway_player = new BroadwayPlayerCtor({
+                    useWorker: true,
+                    workerFile: '/broadway/Decoder.js',
+                    webgl: 'auto',
+                });
+                broadway_player.onPictureDecoded = (_buffer, width, height) => {
+                    audio_adapter.reportVideoSize(width, height);
+                };
+
+                // video 要素の代わりに canvas ベースのシムを DOM に挿入する (シークは非対応のため空の関数を渡す)
+                const shim = createVideoElementShim(broadway_player.canvas, audio_adapter, () => { /* ライブ視聴のためシーク非対応 */ });
+                shim.className = video.className;
+                shim.classList.add('dplayer-video-current');
+                video.replaceWith(shim);
+                player.video = shim;
+
+                if (is_quality_switch === true) {
+                    // setupWebCodecsQuality() と同様、video 要素を使わない都合上 'canplay' イベントが発火しないため、
+                    // DPlayer 本体の switchQuality() が本来行う後処理をここで手動で行う
+                    if (previous_video_element !== null && previous_video_element.parentElement !== null) {
+                        previous_video_element.parentElement.removeChild(previous_video_element);
+                    }
+                    player.prevVideo = null;
+                    player.switchingQuality = false;
+                    player.container.classList.remove('dplayer-loading');
+                    const speed_elem = player.template.settingBox.querySelector<HTMLElement>('.dplayer-setting-speed-current');
+                    if (speed_elem?.dataset.speed !== undefined) {
+                        player.speed(parseFloat(speed_elem.dataset.speed));
+                    }
+                    player.events.trigger('quality_end');
+                }
+
+                // 音声の再生を開始する (映像側の fetch 開始とほぼ同時に始めることで、厳密な同期は取らずとも
+                // 大きくズレないようにする。初期実装ではこれ以上の補正は行わない)
+                await audio.play();
+
+                // 映像側の取得・デコードを開始する (接続が切れるまで戻ってこないため、待たずに戻る)
+                const source = new BroadwayLiveVideoSource(video_quality_url, broadway_player, (message) => {
+                    console.error('\u001b[31m[PlayerController] BroadwayLiveVideoSource error:', message);
+                    player_store.event_emitter.emit('PlayerRestartRequired', {
+                        message: `再生中にエラーが発生しました。(${message}) プレイヤーを再起動しています…`,
+                    });
+                });
+                this.broadway_source = source;
+                void source.start();
+            } catch (error) {
+                reportClientError('BroadwayPlayer/PlayerController/setupBroadwayQuality', error);
+            } finally {
+                // 古いエンジンは新しいエンジンの初回ロードが始まった後に破棄する
+                previous_broadway_source?.destroy();
+                if (previous_broadway_audio !== null && previous_broadway_audio !== audio) {
+                    previous_broadway_audio.pause();
+                    previous_broadway_audio.removeAttribute('src');
+                    previous_broadway_audio.load();
+                    previous_broadway_audio.remove();
+                }
             }
         })();
     }
@@ -2629,6 +2778,19 @@ class PlayerController {
         if (this.playback_engine !== null) {
             await this.playback_engine.destroy();
             this.playback_engine = null;
+        }
+
+        // Broadway.js 自前再生エンジンが稼働中であれば破棄する (fetch の中断・<audio> 要素の破棄)
+        if (this.broadway_source !== null) {
+            this.broadway_source.destroy();
+            this.broadway_source = null;
+        }
+        if (this.broadway_audio !== null) {
+            this.broadway_audio.pause();
+            this.broadway_audio.removeAttribute('src');
+            this.broadway_audio.load();
+            this.broadway_audio.remove();
+            this.broadway_audio = null;
         }
 
         // なぜか例外が出ることがあるので try-catch で囲む

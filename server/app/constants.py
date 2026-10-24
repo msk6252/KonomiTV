@@ -203,6 +203,14 @@ class Quality(BaseModel):
     video_bitrate: str  # 映像のビットレート
     video_bitrate_max: str  # 映像の最大ビットレート
     audio_bitrate: str  # 音声のビットレート
+    # 映像のプロファイル (通常は high / HEVC は main 固定だが、Tesla 車載ブラウザ向けの画質だけ
+    # CABAC・B フレームを使わない baseline を指定する。baseline は Broadway.js などの
+    # WebAssembly 製ソフトウェア H.264 デコーダでもデコードできる唯一のプロファイルのため)
+    profile: Literal['high', 'main', 'baseline'] = 'high'
+    # 映像のみをエンコードし、音声トラックを一切含めないかどうか
+    # Tesla 車載ブラウザは Drive Mode 中に <video> 要素を一時停止してしまうが <audio> 要素は一時停止しないため、
+    # 映像・音声を別々のストリーム (= 別々の画質) に分離して配信する必要があり、その映像側の画質で使う
+    is_video_only: bool = False
 
 # 品質の種類 (型定義)
 QUALITY_TYPES = Literal[
@@ -222,6 +230,9 @@ QUALITY_TYPES = Literal[
     '360p-hevc',
     '240p',
     '240p-hevc',
+    # Tesla 車載ブラウザ向けの内部的な画質 (クライアント側の画質選択 UI には表示せず、UA 判定で自動選択する)
+    'tesla-480p',
+    'tesla-audio',
 ]
 
 # ライブストリーミングで指定できる品質
@@ -373,6 +384,30 @@ QUALITY: dict[QUALITY_TYPES, Quality] = {
         video_bitrate = '450K',
         video_bitrate_max = '650K',
         audio_bitrate = '128K',
+    ),
+    # Tesla 車載ブラウザ向け: H.264 Baseline Profile の映像のみ (音声は 'tesla-audio' で別途配信する)
+    'tesla-480p': Quality(
+        is_hevc = False,
+        is_60fps = False,
+        width = 854,
+        height = 480,
+        video_bitrate = '1200K',
+        video_bitrate_max = '1800K',
+        audio_bitrate = '0K',  # is_video_only のため使われない
+        profile = 'baseline',
+        is_video_only = True,
+    ),
+    # Tesla 車載ブラウザ向け: 音声のみ (映像は 'tesla-480p' で別途配信する)
+    # 映像関連のフィールドは is_video_only=False かつ音声のみの配信では一切参照されないため、ダミー値を入れている
+    'tesla-audio': Quality(
+        is_hevc = False,
+        is_60fps = False,
+        width = 1,
+        height = 1,
+        video_bitrate = '0K',
+        video_bitrate_max = '0K',
+        audio_bitrate = '192K',
+        profile = 'baseline',
     ),
 }
 

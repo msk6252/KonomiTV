@@ -380,3 +380,95 @@ async def LiveMPEGTSStreamAPI(
     response.listen_for_disconnect = listen_for_disconnect_monkeypatch
 
     return response
+
+
+# ***** 音声のみストリーミング API (Tesla 車載ブラウザ向け) *****
+
+
+@router.get(
+    '/{display_channel_id}/{quality}/audio',
+    summary = 'ライブ音声ストリーム API',
+    response_class = Response,
+    responses = {
+        status.HTTP_200_OK: {
+            'description': 'ライブ音声ストリーム (MP3) 。',
+            'content': {'audio/mpeg': {}},
+        }
+    }
+)
+async def LiveAudioStreamAPI(
+    request: Request,
+    display_channel_id: Annotated[str, Depends(ValidateChannelID)],
+    stream_quality: Annotated[StreamQualityWithOptions, Depends(ValidateQuality)],
+):
+    """
+    ライブ音声ストリーム (MP3) を配信する。
+
+    Tesla 車載ブラウザは Drive Mode 中に `<video>` 要素を一時停止してしまうが `<audio>` 要素は一時停止しないため、
+    映像 (`tesla-480p` 等) とは別に、plain `<audio>` 要素で再生できる音声のみのストリームとして配信する。<br>
+    配信の仕組み自体は LiveMPEGTSStreamAPI と同一で、同じチャンネル ID の映像用ストリームとチューナーを共有する。
+
+    何らかの理由でライブストリームが終了しない限り、継続的にレスポンスが出力される（ストリーミング）。
+    """
+
+    # 品質とオプション指定に対応する LiveStream に接続し、ライブストリームクライアントを取得する
+    ## 接続時に Offline だった場合は自動的にエンコードタスクが起動される
+    live_stream = LiveStream(display_channel_id, stream_quality.quality, stream_quality.encoding_options)
+    live_stream_client = await live_stream.connect('mpegts')
+
+    # ライブストリームを出力するジェネレーター
+    async def generator():
+        while True:
+
+            # リクエストがキャンセル（切断）されている場合
+            if await request.is_disconnected():
+
+                # ライブストリームへの接続を切断し、ループを終了する
+                logging.debug(f'{live_stream.log_prefix} Request is disconnected.')
+                live_stream.disconnect(live_stream_client)
+                break
+
+            if live_stream.getStatus().status != 'Offline':
+
+                # クライアントが持つ Queue から読み取ったストリームデータ
+                stream_data: bytes | None = await live_stream_client.readStreamData()
+
+                # 読み取ったストリームデータを yield で随時出力する
+                if stream_data is not None:
+                    yield stream_data
+
+                # stream_data に None が入った場合はエンコードタスクが終了し、接続が切断されたものとみなす
+                else:
+
+                    # ライブストリームへの接続を切断し、ループを終了する
+                    logging.debug(f'{live_stream.log_prefix} Encode task is finished.')
+                    live_stream.disconnect(live_stream_client)  # 必要ないとは思うけど念のため
+                    break
+
+            # ライブストリームが Offline になった場合もエンコードタスクが終了し、接続が切断されたものとみなす
+            else:
+
+                # ライブストリームへの接続を切断し、ループを終了する
+                logging.debug(f'{live_stream.log_prefix} LiveStream is currently Offline.')
+                live_stream.disconnect(live_stream_client)  # 必要ないとは思うけど念のため
+                break
+
+    # StreamingResponse で読み取ったストリームデータをストリーミングする
+    response = StreamingResponse(generator(), media_type='audio/mpeg')
+
+    # HTTP リクエストがキャンセルされたときに自前でライブストリームの接続を切断できるよう、StreamingResponse のインスタンスにモンキーパッチを当てる
+    # モンキーパッチしている理由は LiveMPEGTSStreamAPI と同じ
+    # ref: https://github.com/encode/starlette/pull/839
+    async def listen_for_disconnect_monkeypatch(receive: Receive) -> None:
+        try:
+            while True:
+                message = await receive()
+                if message['type'] == 'http.disconnect':
+                    logging.debug(f'{live_stream.log_prefix} Request is disconnected.')
+                    live_stream.disconnect(live_stream_client)
+                    break
+        except asyncio.CancelledError:
+            pass
+    response.listen_for_disconnect = listen_for_disconnect_monkeypatch
+
+    return response

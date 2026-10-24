@@ -3,7 +3,7 @@ import DPlayer from 'dplayer';
 import { watch } from 'vue';
 import { bmlBrowserFontNames } from 'web-bml';
 
-import { isWebCodecsEngineVideoElement } from '@/services/player/engine/VideoElementShim';
+import { isCustomEngineVideoElement } from '@/services/player/engine/VideoElementShim';
 import KeyboardShortcutManager from '@/services/player/managers/KeyboardShortcutManager';
 import LiveDataBroadcastingManager from '@/services/player/managers/LiveDataBroadcastingManager';
 import PlayerManager from '@/services/player/PlayerManager';
@@ -71,7 +71,7 @@ class DocumentPiPManager implements PlayerManager {
             // WebCodecs 自前再生エンジン (video 要素を使わない canvas ベースのシム) が有効な場合、
             // 暗黙のフォールバックだった「通常の video Picture-in-Picture」が使えなくなる
             // (シムの requestPictureInPicture() は常に失敗するダミーのため) ため、PiP ボタン自体を隠す
-            if (isWebCodecsEngineVideoElement(this.player.video) === true) {
+            if (isCustomEngineVideoElement(this.player.video) === true) {
                 this.player.template.pipButton.style.display = 'none';
                 console.log('[DocumentPiPManager] Initialized. (Document Picture-in-Picture API is not supported; PiP button hidden for WebCodecs engine.)');
             } else {

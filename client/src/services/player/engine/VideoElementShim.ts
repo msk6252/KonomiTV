@@ -1,18 +1,23 @@
 
-import MediaClock from '@/services/player/engine/MediaClock';
+import IPlaybackEngine from '@/services/player/engine/IPlaybackEngine';
 
 
 /**
- * DPlayer (`node_modules/dplayer`) が内部で生成する実 `<video>` 要素を、新しい WebCodecs 自前再生エンジンの
+ * DPlayer (`node_modules/dplayer`) が内部で生成する実 `<video>` 要素を、video 要素を使わない自前再生エンジンの
  * `<canvas>` に置き換えるためのシム
  *
  * DPlayer の `player.ts`/`controller.ts` は `this.video` を型上 `HTMLVideoElement` として扱うが、実行時には
  * プロパティ/メソッドの形が合っていれば動作する (TypeScript の型チェックは実行時には存在しないため)。
  * そこで DPlayer 本体 (node_modules) には一切手を入れず、`<canvas>` という実 DOM 要素に対して
  * `HTMLVideoElement` が持つプロパティ/メソッドのうち、DPlayer と KonomiTV 側コードが実際に参照しているものだけを
- * `MediaClock` へ委譲する形で生やし、呼び出し元からは「video 要素」に見えるようにする
+ * `IPlaybackEngine` へ委譲する形で生やし、呼び出し元からは「video 要素」に見えるようにする
  *
- * イベントについては、`MediaClock` (EventTarget) 上で発火したイベントを canvas 要素自身にも re-dispatch する
+ * `IPlaybackEngine` の実装は WebCodecs 自前再生エンジンの `MediaClock` のほか、Tesla 車載ブラウザ向け
+ * Broadway.js エンジンが使う「plain `<audio>` 要素に委譲するだけの軽量アダプター」
+ * (`AudioElementPlaybackEngineAdapter`) でも共用する。いずれも再生制御の実体を持たない「見た目だけの video 要素」
+ * が必要という点は同じため
+ *
+ * イベントについては、`IPlaybackEngine` (EventTarget) 上で発火したイベントを canvas 要素自身にも re-dispatch する
  * ことで、`video.addEventListener('timeupdate', ...)` や `video.oncanplay = ...` のようなブラウザ標準の
  * イベント購読方法がそのまま (シム側で addEventListener を再実装せずに) 動作するようにしている
  */
@@ -47,20 +52,23 @@ class SimpleTimeRanges implements TimeRanges {
  * @param canvas 表示に使う実 canvas 要素
  * @param mediaClock 再生時刻等のデータを読み書きする先 (currentTime の "読み取り" はここから行う)
  * @param requestSeek `currentTime` への代入 (= シーク要求) があったときに呼ばれるコールバック
- *   MediaClock 単体の更新だけでは実際にソースから新しい位置のセグメントを取得し直す処理が走らないため、
+ *   委譲先の更新だけでは実際にソースから新しい位置のセグメントを取得し直す処理が走らないため、
  *   呼び出し元 (PlayerController) は通常 `PlaybackEngine.seek()` を呼ぶ関数を渡す
+ *   (Broadway.js エンジンではシーク非対応のライブ視聴専用のため、空の関数を渡す想定)
  */
-// WebCodecs エンジンのシムかどうかを判別するための非公開マーカー (列挙不可、値の読み取りのみ用途)
-const WEBCODECS_SHIM_MARKER = '__konomitv_webcodecs_engine_shim__';
+// このシムで生成した video 風オブジェクトかどうかを判別するための非公開マーカー (列挙不可、値の読み取りのみ用途)
+// WebCodecs エンジン・Broadway.js エンジンのいずれでも使われる (どちらも実 video 要素を使わないため、
+// DocumentPiPManager 側では「実 video 要素が無く classic PiP が使えない」という同じ扱いをする)
+const CUSTOM_ENGINE_SHIM_MARKER = '__konomitv_custom_engine_shim__';
 
 /** 渡された要素が createVideoElementShim() で生成されたシムかどうかを判定する */
-export function isWebCodecsEngineVideoElement(video: HTMLVideoElement | null): boolean {
-    return video !== null && (video as unknown as Record<string, unknown>)[WEBCODECS_SHIM_MARKER] === true;
+export function isCustomEngineVideoElement(video: HTMLVideoElement | null): boolean {
+    return video !== null && (video as unknown as Record<string, unknown>)[CUSTOM_ENGINE_SHIM_MARKER] === true;
 }
 
-function createVideoElementShim(canvas: HTMLCanvasElement, mediaClock: MediaClock, requestSeek: (positionSeconds: number) => void): HTMLVideoElement {
+function createVideoElementShim(canvas: HTMLCanvasElement, mediaClock: IPlaybackEngine, requestSeek: (positionSeconds: number) => void): HTMLVideoElement {
     const shim = canvas as unknown as HTMLVideoElement & { [key: string]: unknown };
-    Object.defineProperty(shim, WEBCODECS_SHIM_MARKER, { value: true, enumerable: false });
+    Object.defineProperty(shim, CUSTOM_ENGINE_SHIM_MARKER, { value: true, enumerable: false });
 
     Object.defineProperty(shim, 'currentTime', {
         get: () => mediaClock.currentTime,
