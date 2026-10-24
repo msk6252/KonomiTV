@@ -9,6 +9,8 @@ COPY server/app/schemas.py /code/server/app/schemas.py
 # Tesla 車載ブラウザ向け画質 (tesla-480p / tesla-audio) 追加分を差し替える
 COPY server/app/constants.py /code/server/app/constants.py
 COPY server/app/routers/LiveStreamsRouter.py /code/server/app/routers/LiveStreamsRouter.py
+# avc.wasm (Broadway.js) を正しい Content-Type (application/wasm) で配信するための差し替え
+COPY server/app/app.py /code/server/app/app.py
 # ビルド済みのクライアント (Tesla 用 Canvas 描画ページを含む) で、ベースイメージ内の公式ビルドを差し替える
 # C200 はディスク容量が少なく yarn install / yarn build が実行できないため、client/dist は別マシンでビルドして Git で受け渡す
 COPY client/dist/ /code/client/dist/

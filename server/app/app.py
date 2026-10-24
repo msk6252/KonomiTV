@@ -111,6 +111,9 @@ for suffix, mime_type in [
     ('.js', 'application/javascript'),
     ('.json', 'application/json'),
     ('.map', 'application/json'),
+    # Broadway.js (Tesla 車載ブラウザ向け H.264 Baseline ソフトウェアデコーダ) の avc.wasm 配信用
+    # WebAssembly.instantiateStreaming() は Content-Type が application/wasm であることを要求するため必要
+    ('.wasm', 'application/wasm'),
     ]:
     guess = mimetypes.guess_type(f'foo{suffix}')[0]
     if guess != mime_type:
@@ -137,7 +140,7 @@ def Root(file: str):
     filepath = CLIENT_DIR / file
     if filepath.is_file():
         # 拡張子から MIME タイプを判定
-        if filepath.suffix in ['.css', '.html', '.ico', '.js', '.json', '.map']:
+        if filepath.suffix in ['.css', '.html', '.ico', '.js', '.json', '.map', '.wasm']:
             mime = mimetypes.guess_type(f'foo{filepath.suffix}')[0] or 'text/plain'
         else:
             mime = 'text/plain'
