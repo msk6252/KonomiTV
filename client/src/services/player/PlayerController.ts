@@ -1477,15 +1477,20 @@ class PlayerController {
      * WebCodecs が使えない Canvas 描画モード端末 (Tesla 車載ブラウザ実機等) 向けの第二候補エンジンで、
      * Broadway.js (H.264 Baseline Profile 用 WebAssembly ソフトウェアデコーダ) を使って <canvas> に直接描画する
      *
-     * setupWebCodecsQuality() と異なり、以下の構造上の違いがある:
-     * - Broadway.js の <script> 読み込みが非同期のため、video 要素の置き換え自体も非同期で行う
-     *   (初回のみ発生する一度だけのコストで、以降は loadBroadwayPlayer() がキャッシュした結果を即座に返す)
-     * - 映像の再生時刻管理 (MediaClock 相当) を持たず、別ストリーム ('tesla-audio') を再生する実在の
-     *   <audio> 要素が再生制御の実体を持つ (AudioElementPlaybackEngineAdapter が IPlaybackEngine として委譲する)
-     * - 'broadway' の画質は1つしか存在しない (quality list 構築側の仕様) ため、switchQuality() 経由で
-     *   呼ばれるケースは実質発生しないが、setupWebCodecsQuality() と対称な後処理は念のため用意しておく
+     * DPlayer の template.ts は customType 拡張点の有無に関わらず、quality.url を使って実 <video src="..."> を
+     * 生成する (customType 判定は initMSE() 内で行われ、template 生成はそれより前に完了している)。
+     * この url には生 MPEG-TS の URL (ブラウザがネイティブ再生できない形式) が入っているため、この実 <video> 要素を
+     * DOM に残したままにすると、ブラウザが即座にロードを試みて本物の native error を発生させてしまう
+     * (このメソッドの呼び出し自体は initMSE() の中で同期的に行われるが、Broadway.js の <script> 読み込みは
+     * 非同期のため、置き換えを async ブロック内まで遅延させると、その間に本物の native error が発生していた)
      *
-     * @param video この時点で player.video が指している実 <video> 要素
+     * そのため setupWebCodecsQuality() と同様、実 <video> 要素の置き換えはこのメソッド内で同期的に行う。
+     * ただし Broadway.js の <script> 読み込みは非同期なため、まずは空のプレースホルダー <canvas> に置き換えておき、
+     * 読み込みが完了した後で Broadway.js 本体の <canvas> (WebGL 描画を内蔵) にもう一度置き換える二段構成にしている
+     * (いずれも空の canvas 同士の置き換えのため、映像が一瞬消える等の見た目の影響は無い)
+     *
+     * @param video この時点で player.video が指している実 <video> 要素 (生 MPEG-TS の URL が src に設定されているため、
+     *   即座に DOM から取り除く必要がある)
      * @param player DPlayer のインスタンス
      */
     private setupBroadwayQuality(video: HTMLVideoElement, player: DPlayer): void {
@@ -1515,10 +1520,34 @@ class PlayerController {
         this.broadway_audio = audio;
         const audio_adapter = new AudioElementPlaybackEngineAdapter(audio);
 
+        // 実 <video> 要素は生 MPEG-TS の URL が src に設定されており、DOM に残すとブラウザがロードを試みて
+        // 本物の native error を発生させてしまうため、Broadway.js の読み込み完了を待たずに即座に (同期的に)
+        // プレースホルダーの <canvas> へ置き換える (setupWebCodecsQuality() と同じタイミング)
+        let current_shim = createVideoElementShim(document.createElement('canvas'), audio_adapter, () => { /* ライブ視聴のためシーク非対応 */ });
+        current_shim.className = video.className;
+        current_shim.classList.add('dplayer-video-current');
+        video.replaceWith(current_shim);
+        player.video = current_shim;
+
+        if (is_quality_switch === true) {
+            // setupWebCodecsQuality() と同様、video 要素を使わない都合上 'canplay' イベントが発火しないため、
+            // DPlayer 本体の switchQuality() が本来行う後処理をここで手動で行う
+            if (previous_video_element !== null && previous_video_element.parentElement !== null) {
+                previous_video_element.parentElement.removeChild(previous_video_element);
+            }
+            player.prevVideo = null;
+            player.switchingQuality = false;
+            player.container.classList.remove('dplayer-loading');
+            const speed_elem = player.template.settingBox.querySelector<HTMLElement>('.dplayer-setting-speed-current');
+            if (speed_elem?.dataset.speed !== undefined) {
+                player.speed(parseFloat(speed_elem.dataset.speed));
+            }
+            player.events.trigger('quality_end');
+        }
+
         const player_store = usePlayerStore();
 
-        // Broadway.js の <script> 読み込み (初回のみ) と Player インスタンスの構築、
-        // および video 要素から canvas ベースのシムへの置き換えは、スクリプト読み込みが完了してから行う
+        // Broadway.js の <script> 読み込み (初回のみ) と Player インスタンスの構築は非同期で行う
         void (async () => {
             try {
                 const BroadwayPlayerCtor = await loadBroadwayPlayer();
@@ -1531,28 +1560,14 @@ class PlayerController {
                     audio_adapter.reportVideoSize(width, height);
                 };
 
-                // video 要素の代わりに canvas ベースのシムを DOM に挿入する (シークは非対応のため空の関数を渡す)
+                // プレースホルダーの canvas から Broadway.js 本体の canvas (WebGL 描画を内蔵) に置き換える
+                // (いずれも空の canvas のため、映像が一瞬消える等の見た目の影響は無い)
+                const placeholder_shim = current_shim;
                 const shim = createVideoElementShim(broadway_player.canvas, audio_adapter, () => { /* ライブ視聴のためシーク非対応 */ });
-                shim.className = video.className;
-                shim.classList.add('dplayer-video-current');
-                video.replaceWith(shim);
+                shim.className = placeholder_shim.className;
+                placeholder_shim.replaceWith(shim);
                 player.video = shim;
-
-                if (is_quality_switch === true) {
-                    // setupWebCodecsQuality() と同様、video 要素を使わない都合上 'canplay' イベントが発火しないため、
-                    // DPlayer 本体の switchQuality() が本来行う後処理をここで手動で行う
-                    if (previous_video_element !== null && previous_video_element.parentElement !== null) {
-                        previous_video_element.parentElement.removeChild(previous_video_element);
-                    }
-                    player.prevVideo = null;
-                    player.switchingQuality = false;
-                    player.container.classList.remove('dplayer-loading');
-                    const speed_elem = player.template.settingBox.querySelector<HTMLElement>('.dplayer-setting-speed-current');
-                    if (speed_elem?.dataset.speed !== undefined) {
-                        player.speed(parseFloat(speed_elem.dataset.speed));
-                    }
-                    player.events.trigger('quality_end');
-                }
+                current_shim = shim;
 
                 // 音声の再生を開始する (映像側の fetch 開始とほぼ同時に始めることで、厳密な同期は取らずとも
                 // 大きくズレないようにする。初期実装ではこれ以上の補正は行わない)
