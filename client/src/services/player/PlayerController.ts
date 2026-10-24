@@ -1585,7 +1585,12 @@ class PlayerController {
 
                 // 音声の再生を開始する (映像側の fetch 開始とほぼ同時に始めることで、厳密な同期は取らずとも
                 // 大きくズレないようにする。初期実装ではこれ以上の補正は行わない)
-                await audio.play();
+                // ブラウザの自動再生ポリシーにより拒否される (例外が発生する) ことがあるが、これは異常ではなく、
+                // ユーザー操作やこの後の setupVideoPlaybackHandler() 側の再試行ロジックで後から再生が始まることも多いため、
+                // ここで失敗しても映像側のデコード開始は妨げない (await せず、失敗をログに残すだけにする)
+                audio.play().catch((error) => {
+                    console.warn('\u001b[31m[PlayerController] Broadway audio.play() was rejected (likely blocked by autoplay policy):', error);
+                });
 
                 // 映像側の取得・デコードを開始する (接続が切れるまで戻ってこないため、待たずに戻る)
                 const source = new BroadwayLiveVideoSource(video_quality_url, broadway_player, (message) => {
