@@ -83,7 +83,15 @@ class PlaybackEngine {
         this.videoPipeline.setMaxQueueLength(JitterBuffer.getProfile('Live').videoQueueFrames);
 
         const callbacks: IEngineSourceCallbacks = {
-            onVideoConfig: (config) => this.videoPipeline.configure(config),
+            // ライブ視聴での WebCodecs エンジンは Canvas 描画モード (Tesla 車載ブラウザ向け) でのみ使われる
+            // (loadLiveStream() を呼ぶのはそのルートに限られるため、ここでの設定は Tesla 向けにのみ影響する)
+            // Tesla 車載ブラウザは Drive Mode 中、OS レベルでハードウェア映像デコーダーの利用をブロックする
+            // ことが実機で確認できている (ハードウェアデコードに依存する <video> 要素の再生が止まるのと同じ制約で、
+            // WebCodecs の VideoDecoder がハードウェアデコードを使っていても同様にブロックされ、新しいフレームが
+            // 生成されず canvas が最後のフレームのまま固まる。一方、音声は AudioContext/AudioDecoder の
+            // ソフトウェアデコードのため影響を受けず鳴り続ける、という実機での現象と一致する)
+            // そのため明示的にソフトウェアデコードを優先させ、Drive Mode 中も映像デコードが継続するようにする
+            onVideoConfig: (config) => this.videoPipeline.configure({ ...config, hardwareAcceleration: 'prefer-software' }),
             onAudioConfig: (config) => this.audioPipeline.configure(config),
             onVideoChunk: (chunk) => this.videoPipeline.decode(chunk),
             onAudioChunk: (chunk) => this.audioPipeline.decode(chunk),
