@@ -1435,6 +1435,12 @@ class PlayerController {
         shim.classList.add('dplayer-video-current');
         video.replaceWith(shim);
         player.video = shim;
+        // DOM から取り除いただけでは実 <video> 要素の読み込みが継続してしまう (DOM からの切断は読み込みの
+        // 中断を意味しない) ため、明示的に src を外して load() を呼び、読み込み自体を中断させる
+        // (setupBroadwayQuality() で実際に観測された、無関係な native error によるプレイヤー再起動の原因と同じ理屈)
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
 
         if (is_quality_switch === true) {
             // DPlayer 本体の switchQuality() は、本来 video の 'canplay' イベントをトリガーに
@@ -1528,6 +1534,14 @@ class PlayerController {
         current_shim.classList.add('dplayer-video-current');
         video.replaceWith(current_shim);
         player.video = current_shim;
+        // DOM から取り除いただけでは実 <video> 要素の読み込みが継続してしまう (DOM からの切断は読み込みの
+        // 中断を意味しない) ため、明示的に src を外して load() を呼び、読み込み自体を中断させる
+        // これを行わないと、しばらく経ってから本物の native error イベントが (切断済みのこの要素に直接バインドされた
+        // DPlayer 内部のイベントリスナー経由で) 発火し、再生とは無関係な「Native: unknown error」での
+        // プレイヤー再起動を誘発してしまう
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
 
         if (is_quality_switch === true) {
             // setupWebCodecsQuality() と同様、video 要素を使わない都合上 'canplay' イベントが発火しないため、
