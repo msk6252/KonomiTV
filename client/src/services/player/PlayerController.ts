@@ -1423,9 +1423,19 @@ class PlayerController {
         const previous_video_element = player.prevVideo;
         const previous_playback_engine = this.playback_engine;
 
+        const player_store = usePlayerStore();
+
         // 新しい PlaybackEngine を構築し、video 要素の代わりに canvas ベースのシムを DOM に挿入する
         const engine = new PlaybackEngine();
         this.playback_engine = engine;
+        // VideoPipeline/AudioPipeline がデコードエラーからの自動復旧を繰り返し諦めた場合、既存の
+        // PlayerRestartRequired イベント経由でプレイヤー全体を再起動する (Wi-Fi 環境が不安定な車載ブラウザ等での、
+        // ソフトウェアデコーダーのビットストリーム破損耐性の低さに対する最終手段)
+        engine.setOnFatalPlaybackError((message) => {
+            player_store.event_emitter.emit('PlayerRestartRequired', {
+                message: `再生中にエラーが発生しました。(${message}) プレイヤーを再起動しています…`,
+            });
+        });
         const shim = createVideoElementShim(engine.canvas, engine.mediaClock, (seconds) => {
             void engine.seek(seconds);
         });

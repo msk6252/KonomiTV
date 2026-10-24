@@ -35,9 +35,32 @@ class PlaybackEngine {
         const profile = JitterBuffer.getProfile('Recorded');
         this.videoPipeline = new VideoPipeline(profile.videoQueueFrames);
         this.canvasRenderer = new CanvasRenderer(this.mediaClock, this.videoPipeline);
+        // VideoPipeline/AudioPipeline がデコードエラーからの自動復旧を繰り返し諦めた場合、致命的エラーとして記録する
+        // (DPlayer 側の video 要素は canvas シムに置き換わっており、DPlayer 本体の 'error' イベント転送は
+        // 実 video 要素の DOM ノードに直接 bind されているため、MediaClock 側で 'error' イベントを発火させても
+        // DPlayer 本体には届かない。実際にプレイヤー再起動を発生させたい場合は setOnFatalPlaybackError() で
+        // 別途フックする必要がある)
+        this.videoPipeline.setOnFatalError((message) => {
+            this.mediaClock.setError(0, message);
+            this.onFatalPlaybackError?.(message);
+        });
+        this.audioPipeline.setOnFatalError((message) => {
+            this.mediaClock.setError(0, message);
+            this.onFatalPlaybackError?.(message);
+        });
 
         // 音量/ミュート操作は MediaClock 側のプロパティを単一の真実源としつつ、実際の音声出力への反映は AudioPipeline に委ねる
         this.mediaClock.addEventListener('volumechange', this.onVolumeChange);
+    }
+
+    private onFatalPlaybackError: ((message: string) => void) | null = null;
+
+    /**
+     * VideoPipeline/AudioPipeline がデコードエラーからの自動復旧を諦めた際に呼ばれるコールバックを登録する
+     * PlayerController 側でこれを使い、既存の PlayerRestartRequired イベント経由でプレイヤー全体を再起動させる想定
+     */
+    public setOnFatalPlaybackError(callback: (message: string) => void): void {
+        this.onFatalPlaybackError = callback;
     }
 
     private readonly onVolumeChange = (): void => {

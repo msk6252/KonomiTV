@@ -9,6 +9,12 @@ import reportClientError from '@/utils/ClientErrorReporter';
  * デコード自体はここで完結させ、「いつ画面に出すか」の判断は CanvasRenderer に委ねる
  * (このクラスは AV 同期やスケジューリングには関与しない)
  */
+// 自動復旧を試みる回数の上限 (この回数を超えて短時間に繰り返しエラーが発生する場合は、
+// 一時的なビットストリーム破損ではなく構造的な問題とみなし、致命的エラーとして上位に伝える)
+const MAX_AUTO_RECOVERY_ATTEMPTS = 5;
+// この秒数の間エラーが発生しなければ、連続エラー数のカウントをリセットする
+const AUTO_RECOVERY_RESET_SECONDS = 10;
+
 class VideoPipeline {
 
     private decoder: VideoDecoder | null = null;
@@ -22,6 +28,14 @@ class VideoPipeline {
     // キューの最大保持数 (ライブは低遅延優先で短く、録画は安定性優先で長く、JitterBuffer のプロファイルに応じて渡される)
     private maxQueueLength: number;
 
+    // 直前に configure() に渡された config (デコーダーがエラーで closed になった際の自動再構築に使う)
+    private lastConfig: VideoDecoderConfig | null = null;
+    // 直近の連続エラー発生回数と、カウントをリセットするタイマー
+    private consecutiveErrorCount = 0;
+    private errorResetTimeoutId: number | null = null;
+    // 自動復旧を諦めた場合 (致命的エラー) に呼ばれるコールバック (PlaybackEngine 経由で MediaClock.setError() に繋がる)
+    private onFatalError: ((message: string) => void) | null = null;
+
     constructor(maxQueueLength: number) {
         this.maxQueueLength = maxQueueLength;
     }
@@ -30,8 +44,14 @@ class VideoPipeline {
         this.maxQueueLength = length;
     }
 
+    /** 自動復旧を諦めた際に呼ばれるコールバックを登録する */
+    public setOnFatalError(callback: (message: string) => void): void {
+        this.onFatalError = callback;
+    }
+
     /**
-     * 映像デコーダーを (再) 構築する。コーデック・解像度が変わった場合に呼ぶ
+     * 映像デコーダーを (再) 構築する。コーデック・解像度が変わった場合、またはデコーダーがエラーで
+     * closed になった際の自動復旧時に呼ぶ
      * デマルチプレクサ側の解析ミス等で不正な config が渡ってきても、デコーダー未構成のまま
      * (= このコーデック変更は無視される) にするだけで、再生全体を落とさない
      */
@@ -40,13 +60,47 @@ class VideoPipeline {
         try {
             const decoder = new VideoDecoder({
                 output: (frame) => this.onFrame(frame),
-                error: (error) => reportClientError('WebCodecsPlayer/VideoPipeline/decode', error),
+                error: (error) => this.handleDecoderError(error),
             });
             decoder.configure(config);
             this.decoder = decoder;
+            this.lastConfig = config;
             this.awaitingKeyFrame = true;
         } catch (error) {
             reportClientError('WebCodecsPlayer/VideoPipeline', error);
+        }
+    }
+
+    /**
+     * VideoDecoder がエラーを報告したときの処理
+     * WebCodecs の仕様上、error コールバックが発火した時点でデコーダーは自動的に closed 状態になり、
+     * それ以降 decode() を呼んでも無視され続ける (= 映像が永久に停止する) ため、ここで同じ config を使って
+     * デコーダーを再構築し、次のキーフレームから復旧を試みる
+     * (Wi-Fi 環境が不安定な車載ブラウザ等では、ビットストリームの一部破損によるデコードエラーが
+     * 一時的に発生することがあり、特にソフトウェアデコード使用時 (Tesla の Drive Mode 対策) はこれに弱い)
+     * 短時間に繰り返し発生する場合は構造的な問題と判断し、致命的エラーとして上位に伝えて自動復旧を諦める
+     */
+    private handleDecoderError(error: Error): void {
+        reportClientError('WebCodecsPlayer/VideoPipeline/decode', error);
+
+        if (this.errorResetTimeoutId !== null) {
+            window.clearTimeout(this.errorResetTimeoutId);
+        }
+        this.errorResetTimeoutId = window.setTimeout(() => {
+            this.consecutiveErrorCount = 0;
+            this.errorResetTimeoutId = null;
+        }, AUTO_RECOVERY_RESET_SECONDS * 1000);
+
+        this.consecutiveErrorCount += 1;
+        if (this.consecutiveErrorCount > MAX_AUTO_RECOVERY_ATTEMPTS) {
+            reportClientError('WebCodecsPlayer/VideoPipeline',
+                new Error(`Giving up automatic recovery after ${MAX_AUTO_RECOVERY_ATTEMPTS} consecutive decode errors.`));
+            this.onFatalError?.(`映像デコードエラーが連続して発生しました。(${error.message})`);
+            return;
+        }
+
+        if (this.lastConfig !== null) {
+            this.configure(this.lastConfig);
         }
     }
 

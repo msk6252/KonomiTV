@@ -6,6 +6,10 @@ import reportClientError from '@/utils/ClientErrorReporter';
 // (worker-modules.d.ts 的な別プログラムとして扱われ、メインスレッドの DOM lib とは型を共有しない)
 const WORKLET_URL = new URL('./worklets/pcm-ring-buffer-processor.js', import.meta.url);
 
+// VideoPipeline.ts と同じ自動復旧の上限・リセット時間 (詳細はそちらのコメントを参照)
+const MAX_AUTO_RECOVERY_ATTEMPTS = 5;
+const AUTO_RECOVERY_RESET_SECONDS = 10;
+
 /**
  * AAC 等のエンコード済み音声チャンクを WebCodecs の AudioDecoder でデコードし、
  * AudioWorkletNode 経由で Web Audio API に出力するパイプライン
@@ -27,9 +31,20 @@ class AudioPipeline {
     private sampleRate = 48000;
     private numberOfChannels = 2;
 
+    // 直前に configure() に渡された config (デコーダーがエラーで closed になった際の自動再構築に使う)
+    private lastConfig: AudioDecoderConfig | null = null;
+    private consecutiveErrorCount = 0;
+    private errorResetTimeoutId: number | null = null;
+    private onFatalError: ((message: string) => void) | null = null;
+
     constructor(audioContext: AudioContext, mediaClock: MediaClock) {
         this.audioContext = audioContext;
         this.mediaClock = mediaClock;
+    }
+
+    /** 自動復旧を諦めた際に呼ばれるコールバックを登録する */
+    public setOnFatalError(callback: (message: string) => void): void {
+        this.onFatalError = callback;
     }
 
     /** AudioWorklet モジュールを読み込む (configure() の前に1回だけ呼ぶ必要がある) */
@@ -64,15 +79,45 @@ class AudioPipeline {
         try {
             const decoder = new AudioDecoder({
                 output: (audioData) => this.onAudioData(audioData),
-                error: (error) => reportClientError('WebCodecsPlayer/AudioPipeline/decode', error),
+                error: (error) => this.handleDecoderError(error),
             });
             decoder.configure(config);
             this.decoder = decoder;
+            this.lastConfig = config;
         } catch (error) {
             reportClientError('WebCodecsPlayer/AudioPipeline', error);
             return;
         }
         this.setupWorkletNode();
+    }
+
+    /**
+     * AudioDecoder がエラーを報告したときの処理 (VideoPipeline.handleDecoderError() と同じ考え方)
+     * error コールバック発火時点でデコーダーは closed になり、decode() が永久に無視され続けるため、
+     * 同じ config で再構築して復旧を試みる。短時間に繰り返す場合は致命的エラーとして上位に伝える
+     */
+    private handleDecoderError(error: Error): void {
+        reportClientError('WebCodecsPlayer/AudioPipeline/decode', error);
+
+        if (this.errorResetTimeoutId !== null) {
+            window.clearTimeout(this.errorResetTimeoutId);
+        }
+        this.errorResetTimeoutId = window.setTimeout(() => {
+            this.consecutiveErrorCount = 0;
+            this.errorResetTimeoutId = null;
+        }, AUTO_RECOVERY_RESET_SECONDS * 1000);
+
+        this.consecutiveErrorCount += 1;
+        if (this.consecutiveErrorCount > MAX_AUTO_RECOVERY_ATTEMPTS) {
+            reportClientError('WebCodecsPlayer/AudioPipeline',
+                new Error(`Giving up automatic recovery after ${MAX_AUTO_RECOVERY_ATTEMPTS} consecutive decode errors.`));
+            this.onFatalError?.(`音声デコードエラーが連続して発生しました。(${error.message})`);
+            return;
+        }
+
+        if (this.lastConfig !== null) {
+            this.configure(this.lastConfig);
+        }
     }
 
     private setupWorkletNode(): void {
