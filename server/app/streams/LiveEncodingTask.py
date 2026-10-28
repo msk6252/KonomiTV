@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, cast
 import aiofiles
 import aiohttp
 import anyio
-import httpx
+import httpx2 as httpx
 from aiofiles.threadpool.text import AsyncTextIOWrapper
 from biim.mpeg2ts import ts
 
@@ -399,9 +399,12 @@ class LiveEncodingTask:
         max_interleave_delta = round(500 + (self._retry_count * 100))
         options.append('-m avioflags:direct -m fflags:nobuffer+flush_packets -m flush_packets:1 -m max_delay:250000')
         options.append(f'-m max_interleave_delta:{max_interleave_delta}K --output-thread 0 --lowlatency')
-        ## QSVEncC と rkmppenc では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
+        ## QSVEncC と rkmppenc では 24fps モード以外では OpenCL を使用しないので、無効化することで初期化フェーズを高速化する
         if (encoder_type == 'QSVEncC' or encoder_type == 'rkmppenc') and not self.live_stream.encoding_options.is_24fps_mode_enabled:
             options.append('--disable-opencl')
+        ## QSVEncC かつ OpenCL が使われる経路において、OpenCL タスクを従来通りシングルスレッドで実行することで、CPU 使用率を下げる
+        if encoder_type == 'QSVEncC':
+            options.append('--opencl-task-threads 0')
         ## NVEncC では NVML によるモニタリングと DX11, Vulkan を無効化することで初期化フェーズを高速化する
         if encoder_type == 'NVEncC':
             options.append('--disable-nvml 1 --disable-dx11 --disable-vulkan')
@@ -561,6 +564,7 @@ class LiveEncodingTask:
             fallback_channel_type = 'CS'
 
         mirakurun_or_mirakc = 'Mirakurun'
+
         async with HTTPX_CLIENT() as client:
 
             # 0.1 秒間隔で最大 0.5 秒間チューナーの空きを確認する
