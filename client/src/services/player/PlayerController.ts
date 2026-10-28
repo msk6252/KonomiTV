@@ -1157,7 +1157,8 @@ class PlayerController {
 
             // すでに破棄済みであれば何もしない
             if (this.destroyed === true || this.player === null) return;
-            console.warn('\u001b[31m[PlayerController] PlayerRestartRequired event received. Message: ', event.message);
+            // 切断原因の切り分け用タイムスタンプ (LiveVideoSource.ts/BroadwayLiveVideoSource.ts の診断ログと合わせて参照する)
+            console.warn(`\u001b[31m[PlayerController] PlayerRestartRequired event received at ${new Date().toISOString()}. Message: `, event.message);
 
             // ライブ視聴: iOS 17.0 以下で mpegts.js がサポートされていない場合は再起動できない
             if (this.playback_mode === 'Live' && mpegts.isSupported() !== true) {  // mpegts.js 非対応環境では undefined が返る

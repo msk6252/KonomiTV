@@ -15,8 +15,12 @@ const RECORDED_PROFILE: JitterBufferProfile = {
 };
 
 const LIVE_PROFILE: JitterBufferProfile = {
-    // 低遅延優先で短め (Phase 3 着手時に実測のうえ調整する)
-    videoQueueFrames: 30,
+    // 低遅延優先で短めにしつつも、デコードエラーからの自動復旧 (VideoPipeline.ts) やネットワークジッターで
+    // 一時的に decode() が詰まった後、バックログがまとめて (リアルタイムより速く) デコードされてキューに
+    // 押し込まれるケースを吸収できるよう、30fps 換算で約2秒分の余裕を持たせる
+    // (MediaClock.ts の壁時計先走り防止策と合わせて、この余裕分が「本来まだ必要なフレーム」を
+    // 誤って破棄してしまう二次被害を避けるためのバッファになる)
+    videoQueueFrames: 60,
 };
 
 class JitterBuffer {

@@ -65,6 +65,10 @@ class LiveVideoSource implements IEngineSource {
 
     private async startStreaming(): Promise<void> {
         this.abortController = new AbortController();
+        // 切断の原因が「こちら側 (destroy() による意図的な abort)」か「相手側 (サーバー/Cloudflare 等の中継)」かを
+        // 切り分けるための診断ログ。切断時刻の前後にこの fetch 自身の destroy() ログがあるかどうかで判別できる
+        // (Cloudflare Tunnel 等の「stream canceled」調査用。恒久的な実装ではなく原因特定ができたら削除してよい)
+        console.log(`[LiveVideoSource] startStreaming() begin at ${new Date().toISOString()}: ${this.streamUrl}`);
         try {
             const response = await fetch(this.streamUrl, { signal: this.abortController.signal });
             if (!response.ok || response.body === null) {
@@ -74,6 +78,10 @@ class LiveVideoSource implements IEngineSource {
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) {
+                    // destroy() を呼んでいないのに自然に done になった場合、サーバー側 (あるいは途中の
+                    // プロキシ/Tunnel) がこちらの意図と無関係にストリームを終了させたことを意味する
+                    console.log(`[LiveVideoSource] reader.read() returned done=true at ${new Date().toISOString()}. ` +
+                        `this.destroyed=${this.destroyed} (false ならこちら側の abort() ではなく相手側が切断した可能性が高い)`);
                     break;
                 }
                 this.processChunk(value);
@@ -82,6 +90,11 @@ class LiveVideoSource implements IEngineSource {
                 this.callbacks.onEnded();
             }
         } catch (error) {
+            // AbortError かどうかで、こちら側の destroy() による意図的な中断か、それ以外のネットワークエラーかを判別できる
+            const is_abort_error = error instanceof DOMException && error.name === 'AbortError';
+            console.log(`[LiveVideoSource] startStreaming() caught error at ${new Date().toISOString()}: ` +
+                `name=${error instanceof Error ? error.name : typeof error}, isAbortError=${is_abort_error}, ` +
+                `this.destroyed=${this.destroyed}`, error);
             // destroy() による AbortError は正常な終了なのでエラー報告しない
             if (this.destroyed === false) {
                 this.callbacks.onError(error instanceof Error ? error.message : String(error));
@@ -146,6 +159,8 @@ class LiveVideoSource implements IEngineSource {
     }
 
     public async destroy(): Promise<void> {
+        // こちら側が意図的に fetch を中断するタイミングを記録する (切断原因の切り分け用、上記コメント参照)
+        console.log(`[LiveVideoSource] destroy() called at ${new Date().toISOString()}: aborting fetch for ${this.streamUrl}`);
         this.destroyed = true;
         this.abortController?.abort();
     }

@@ -44,7 +44,15 @@ export const HAVE_ENOUGH_DATA = 4;
 
 // AudioPipeline からの実測報告と、基準点からの計算値のズレがこの閾値を超えた場合のみ基準点を再補正する
 // (毎フレーム補正すると音声のピッチ変動や映像のちらつきにつながるため、閾値未満の揺れは無視する)
+// この閾値は「実測値が計算値より進んでいる (音声が壁時計に対し先行している)」側にのみ適用する
 const DRIFT_RESYNC_THRESHOLD_SECONDS = 0.02;
+
+// 「壁時計の計算値が実測値より進んでいる (= 音声デコードの詰まり等で実際の再生位置が壁時計に追いつけていない)」
+// 場合は、閾値を設けずほぼ即座に補正する (微小なノイズだけ無視するための epsilon)
+// この方向のズレを放置すると、壁時計の計算値だけが先走った状態で VideoPipeline がフレームを選んでしまい、
+// 本来まだ必要な古いフレームを「表示機会を逃した」と誤判定して破棄してしまう二次被害が起きるため、
+// 音声が先行する場合 (DRIFT_RESYNC_THRESHOLD_SECONDS) より優先して・素早く補正する必要がある
+const BACKWARD_DRIFT_RESYNC_EPSILON_SECONDS = 0.005;
 
 /**
  * WebCodecs 自前再生エンジンにおける、再生時刻・duration・paused・volume 等の単一の真実源
@@ -130,13 +138,20 @@ class MediaClock extends EventTarget implements IPlaybackEngine {
     /**
      * AudioPipeline から約250ms間隔で呼ばれる、実際に消費済みのサンプルに対応するコンテンツ再生時刻の報告
      * 計算値との差が閾値を超えた場合のみ基準点を一括補正する (Deinterlacer のドリフト補正と同じ発想)
+     *
+     * 2方向で補正の積極性を変えている:
+     * - 実測値が計算値より遅れている場合 (drift < 0、音声デコードの詰まり等で壁時計だけが先走った状態):
+     *   ほぼ即座に補正する。これを放置すると VideoPipeline が「先走った壁時計」に対応するフレームを選んでしまい、
+     *   本来まだ必要な古いフレームを誤って破棄する二次被害が起きるため、優先して早く補正する必要がある
+     * - 実測値が計算値より進んでいる場合 (drift > 0、音声が壁時計より先行している):
+     *   従来通り閾値 (20ms) を超えた場合のみ補正する (微小な揺れでの頻繁な補正を避ける)
      */
     public reportAudioAnchor(contentTimeSeconds: number): void {
         if (this._paused) {
             return;
         }
         const drift = contentTimeSeconds - this.currentTime;
-        if (Math.abs(drift) > DRIFT_RESYNC_THRESHOLD_SECONDS) {
+        if (drift < -BACKWARD_DRIFT_RESYNC_EPSILON_SECONDS || drift > DRIFT_RESYNC_THRESHOLD_SECONDS) {
             this.rebaseTo(contentTimeSeconds);
         }
     }

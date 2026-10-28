@@ -41,6 +41,8 @@ class BroadwayLiveVideoSource {
     /** 接続が切れるまで戻ってこない無限ループのため、呼び出し元はバックグラウンドで走らせたまま戻ること */
     public async start(): Promise<void> {
         this.abortController = new AbortController();
+        // LiveVideoSource.ts と同じ理由の診断ログ (切断原因がこちら側の destroy() か相手側かを切り分ける用)
+        console.log(`[BroadwayLiveVideoSource] start() begin at ${new Date().toISOString()}: ${this.streamUrl}`);
         try {
             const response = await fetch(this.streamUrl, { signal: this.abortController.signal });
             if (!response.ok || response.body === null) {
@@ -50,11 +52,17 @@ class BroadwayLiveVideoSource {
             for (;;) {
                 const { done, value } = await reader.read();
                 if (done) {
+                    console.log(`[BroadwayLiveVideoSource] reader.read() returned done=true at ${new Date().toISOString()}. ` +
+                        `this.destroyed=${this.destroyed}`);
                     break;
                 }
                 this.processChunk(value);
             }
         } catch (error) {
+            const is_abort_error = error instanceof DOMException && error.name === 'AbortError';
+            console.log(`[BroadwayLiveVideoSource] start() caught error at ${new Date().toISOString()}: ` +
+                `name=${error instanceof Error ? error.name : typeof error}, isAbortError=${is_abort_error}, ` +
+                `this.destroyed=${this.destroyed}`, error);
             // destroy() による AbortError は正常な終了なのでエラー報告しない
             if (this.destroyed === false) {
                 this.onError(error instanceof Error ? error.message : String(error));
@@ -101,6 +109,7 @@ class BroadwayLiveVideoSource {
     }
 
     public destroy(): void {
+        console.log(`[BroadwayLiveVideoSource] destroy() called at ${new Date().toISOString()}: aborting fetch for ${this.streamUrl}`);
         this.destroyed = true;
         this.abortController?.abort();
     }
