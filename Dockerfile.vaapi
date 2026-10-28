@@ -1,7 +1,16 @@
 FROM ghcr.io/tsukumijima/konomitv:latest
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo && \
+    apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo python3-pip && \
     rm -rf /var/lib/apt/lists/*
+# ベースイメージには passlib (constants.py の PASSWORD_CONTEXT が要求する) がインストールされていないため、
+# constants.py を差し替える前に明示的に追加する (server/pyproject.toml の指定バージョンに合わせる)
+# ベースイメージはビルド後に pip 自体を削除して軽量化しているため、ここで入れた python3-pip ごと
+# このレイヤーの最後に削除し、イメージサイズの肥大化を避ける
+# (--break-system-packages は Debian 12/Ubuntu 23.04 以降の pip で必要な PEP 668 回避フラグ。
+# それより古い pip では未知のオプションとして拒否されるため、まず無しで試してから必要な場合だけ付け直す)
+RUN (pip3 install --no-cache-dir "passlib[bcrypt]>=1.7.4,<2" || \
+     pip3 install --no-cache-dir --break-system-packages "passlib[bcrypt]>=1.7.4,<2") && \
+    apt-get purge -y --auto-remove python3-pip
 COPY server/app/streams/LiveEncodingTask.py /code/server/app/streams/LiveEncodingTask.py
 # クライアントエラー報告 API (ClientErrorReportAPI) 追加分を差し替える
 COPY server/app/routers/MaintenanceRouter.py /code/server/app/routers/MaintenanceRouter.py
