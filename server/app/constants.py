@@ -17,6 +17,11 @@ from pydantic import BaseModel, PositiveInt
 # バージョン
 VERSION = '0.14.1'
 
+# pytest 実行中かどうかを判定するためのサフィックス
+## config.py の _CONFIG_YAML_PATH が参照し、テスト実行中はテストが書き出す config.test.yaml を、
+## 通常運用時 (Docker 上での実運用等) は空文字列のまま config.yaml を読み込む
+TEST_SUFFIX = '.test' if 'pytest' in sys.modules else ''
+
 # 日本標準時 (JST, UTC+9) の ZoneInfo
 ## KonomiTV は日本向けのアプリケーションのため、日時は JST で統一して扱う
 JST = ZoneInfo('Asia/Tokyo')
