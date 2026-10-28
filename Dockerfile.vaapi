@@ -1,19 +1,14 @@
 FROM ghcr.io/tsukumijima/konomitv:latest
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo python3-pip && \
+    apt-get install -y --no-install-recommends ffmpeg i965-va-driver vainfo && \
     rm -rf /var/lib/apt/lists/*
-# ベースイメージには passlib (constants.py の PASSWORD_CONTEXT が要求する) がインストールされていないため、
-# constants.py を差し替える前に明示的に追加する (server/pyproject.toml の指定バージョンに合わせる)
-# 実際の起動は /code/server/.venv/bin/python (ENTRYPOINT) で行われ、システム Python
-# (/usr/bin/python3、/usr/local/lib/.../dist-packages) とは完全に分離された venv のため、
-# システム側の pip で素直に pip3 install しても venv からは見えない。この venv には uv 管理のため
-# pip 自体が入っていない (python -m pip が使えない) ので、システム側の pip に --target で
-# venv の site-packages を直接指定させることで、venv 内に pip を導入せずにインストールする
-# ベースイメージはビルド後に pip 自体を削除して軽量化しているため、ここで入れた python3-pip ごと
-# このレイヤーの最後に削除し、イメージサイズの肥大化を避ける
-RUN VENV_SITE_PACKAGES=$(/code/server/.venv/bin/python -c "import site; print(site.getsitepackages()[0])") && \
-    pip3 install --no-cache-dir --target="$VENV_SITE_PACKAGES" "passlib[bcrypt]>=1.7.4,<2" && \
-    apt-get purge -y --auto-remove python3-pip
+# 注意: ベースイメージ (VERSION '0.15.0-dev') はこのフォークのチェックアウト時点 ('0.14.1') より進んでおり、
+# passlib → pwdlib、httpx → httpx2 などの移行が既に行われている。constants.py はベースイメージ側の
+# 最新版をベースに Tesla 向けの変更 (profile/is_video_only フィールド、tesla-480p/tesla-audio 画質) だけを
+# 移植したものに置き換えている (単純な古いバージョンの上書きではない)。他の COPY 対象ファイルでも
+# 同様のバージョン差異によるインポートエラーが起こり得るため、エラーが出た場合は同じ手順
+# (`docker run --rm --entrypoint cat ghcr.io/tsukumijima/konomitv:latest <path>` でベースイメージ本来の
+# ファイルを取得し、変更点だけを移植し直す) で対応する
 COPY server/app/streams/LiveEncodingTask.py /code/server/app/streams/LiveEncodingTask.py
 # クライアントエラー報告 API (ClientErrorReportAPI) 追加分を差し替える
 COPY server/app/routers/MaintenanceRouter.py /code/server/app/routers/MaintenanceRouter.py
